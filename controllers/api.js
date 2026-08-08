@@ -568,8 +568,13 @@ router.get('/checkrouteinvoice', async function (req, res) {
   });
 });
 
-router.get('/queryroutes/:source/:dest/:amt', async function (req, res) {
+router.get('/queryroutes/:source/:dest/:amt', postLimiter, async function (req, res) {
   logger.log('/queryroutes', [req.id]);
+
+  let u = new User(redis, bitcoinclient, lightning);
+  if (!(await u.loadByAuthorization(req.headers.authorization))) {
+    return errorBadAuth(res);
+  }
 
   let request = {
     pub_key: req.params.dest,
@@ -583,8 +588,13 @@ router.get('/queryroutes/:source/:dest/:amt', async function (req, res) {
   });
 });
 
-router.get('/getchaninfo/:chanid', async function (req, res) {
+router.get('/getchaninfo/:chanid', postLimiter, async function (req, res) {
   logger.log('/getchaninfo', [req.id]);
+
+  let u = new User(redis, bitcoinclient, lightning);
+  if (!(await u.loadByAuthorization(req.headers.authorization))) {
+    return errorBadAuth(res);
+  }
 
   if (lightningDescribeGraph && lightningDescribeGraph.edges) {
     for (const edge of lightningDescribeGraph.edges) {
