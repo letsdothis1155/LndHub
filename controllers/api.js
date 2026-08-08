@@ -6,8 +6,21 @@ let express = require('express');
 let router = express.Router();
 let logger = require('../utils/logger');
 const MIN_BTC_BLOCK = 670000;
+
+// Redacts credentials before the startup config gets logged - the raw
+// config carries the bitcoind RPC password, LND wallet password, and
+// Yubico secret key, none of which belong in stdout/log aggregators.
+function redactConfigForLogging(cfg) {
+  return {
+    ...cfg,
+    bitcoind: cfg.bitcoind && { ...cfg.bitcoind, rpc: cfg.bitcoind.rpc && cfg.bitcoind.rpc.replace(/:[^:@/]+@/, ':***@') },
+    lnd: cfg.lnd && { ...cfg.lnd, password: cfg.lnd.password ? '***' : cfg.lnd.password },
+    yubico: cfg.yubico && { ...cfg.yubico, secretKey: cfg.yubico.secretKey ? '***' : cfg.yubico.secretKey },
+  };
+}
+
 if (process.env.NODE_ENV !== 'prod') {
-  console.log('using config', JSON.stringify(config));
+  console.log('using config', JSON.stringify(redactConfigForLogging(config)));
 }
 
 var Redis = require('ioredis');
