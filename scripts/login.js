@@ -31,26 +31,32 @@ function readHidden(promptText) {
     stdin.resume();
     stdin.setEncoding('utf8');
     let value = '';
+    // Scan every character in the chunk individually - a YubiKey burst-types
+    // its OTP faster than a human, so the terminal may deliver the OTP text
+    // and its trailing Enter as a single chunk. Checking only chunk[0] misses
+    // a mid-chunk terminator and silently corrupts the captured value.
     const onData = (chunk) => {
       const str = chunk.toString();
-      const code = str.charCodeAt(0);
-      if (code === KEYCODE_ENTER_CR || code === KEYCODE_ENTER_LF) {
-        stdin.setRawMode(false);
-        stdin.pause();
-        stdin.removeListener('data', onData);
-        process.stdout.write('\n');
-        resolve(value);
-        return;
+      for (let i = 0; i < str.length; i++) {
+        const code = str.charCodeAt(i);
+        if (code === KEYCODE_ENTER_CR || code === KEYCODE_ENTER_LF) {
+          stdin.setRawMode(false);
+          stdin.pause();
+          stdin.removeListener('data', onData);
+          process.stdout.write('\n');
+          resolve(value);
+          return;
+        }
+        if (code === KEYCODE_CTRL_C) {
+          stdin.setRawMode(false);
+          process.exit(1);
+        }
+        if (code === KEYCODE_DEL || code === KEYCODE_BACKSPACE) {
+          value = value.slice(0, -1);
+          continue;
+        }
+        value += str[i];
       }
-      if (code === KEYCODE_CTRL_C) {
-        stdin.setRawMode(false);
-        process.exit(1);
-      }
-      if (code === KEYCODE_DEL || code === KEYCODE_BACKSPACE) {
-        value = value.slice(0, -1);
-        return;
-      }
-      value += str;
     };
     stdin.on('data', onData);
   });

@@ -4,7 +4,7 @@
   "description": "",
   "main": "index.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1",
+    "test": "jest",
     "dockerbuild": "./node_modules/.bin/babel ./ --ignore node_modules/ --ignore *.spec.js --out-dir ./build",
     "dev": "nodemon node_modules/.bin/babel-node index.js",
     "start": "node_modules/.bin/babel-node index.js",
@@ -47,5 +47,12 @@
     "request-promise": "^4.2.6",
     "uuid": "^8.3.2",
     "winston": "^3.3.3"
+  },
+  "devDependencies": {
+    "babel-jest": "^30.4.1",
+    "jest": "^30.4.2"
+  },
+  "jest": {
+    "testEnvironment": "node"
   }
 }
