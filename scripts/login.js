@@ -105,7 +105,10 @@ async function doLogin(login) {
   }
 
   saveSession(login, json);
-  console.log('Logged in. access_token:', json.access_token);
+  // deliberately not printing the token: it is a non-expiring bearer credential
+  // for the whole account, and echoing it leaks it into scrollback, shell logs,
+  // and anything the terminal output gets pasted into
+  console.log(`Logged in as ${login}. Session saved to ${SESSION_FILE}`);
 }
 
 async function doRefresh() {
@@ -128,7 +131,7 @@ async function doRefresh() {
   }
 
   saveSession(session.login, json);
-  console.log('Refreshed. access_token:', json.access_token);
+  console.log(`Refreshed. Session saved to ${SESSION_FILE}`);
 }
 
 function doWhoami() {
@@ -137,7 +140,16 @@ function doWhoami() {
     console.log('No saved session.');
     return;
   }
-  console.log(JSON.stringify(session, null, 2));
+  // tokens are shown only as a short fingerprint - enough to tell sessions
+  // apart, useless to anyone who reads it over your shoulder or in a log
+  const fingerprint = (t) => (t ? `${t.slice(0, 6)}…(${t.length} chars)` : '(none)');
+  console.log(
+    JSON.stringify(
+      { login: session.login, access_token: fingerprint(session.access_token), refresh_token: fingerprint(session.refresh_token) },
+      null,
+      2,
+    ),
+  );
 }
 
 async function doEnroll() {
