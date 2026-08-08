@@ -1,6 +1,7 @@
 import { User, Lock, Paym, Invo } from '../class/';
 import fetch from 'node-fetch';
 const config = require('../config');
+const yubikey = require('../utils/yubikey');
 let express = require('express');
 let router = express.Router();
 let logger = require('../utils/logger');
@@ -137,10 +138,13 @@ const postLimiter = rateLimit({
 router.post('/create', postLimiter, async function (req, res) {
   logger.log('/create', [req.id]);
   // Valid if the partnerid isn't there or is a string (same with accounttype)
-  if (! (
-        (!req.body.partnerid || (typeof req.body.partnerid === 'string' || req.body.partnerid instanceof String))
-        && (!req.body.accounttype || (typeof req.body.accounttype === 'string' || req.body.accounttype instanceof String))
-      ) ) return errorBadArguments(res);
+  if (
+    !(
+      (!req.body.partnerid || typeof req.body.partnerid === 'string' || req.body.partnerid instanceof String) &&
+      (!req.body.accounttype || typeof req.body.accounttype === 'string' || req.body.accounttype instanceof String)
+    )
+  )
+    return errorBadArguments(res);
 
   if (config.sunset) return errorSunset(res);
 
@@ -165,11 +169,21 @@ router.post('/auth', postLimiter, async function (req, res) {
     }
   } else {
     // need to authorize user
+    if (config.yubico.requiredForLogins.includes(req.body.login)) {
+      if (!(await verifyYubikey(req.body.yubikey_otp))) return errorBadAuth(res);
+    }
+
     let result = await u.loadByLoginAndPassword(req.body.login, req.body.password);
     if (result) res.send({ refresh_token: u.getRefreshToken(), access_token: u.getAccessToken() });
     else errorBadAuth(res);
   }
 });
+
+async function verifyYubikey(otp) {
+  if (!otp) return false;
+  const { valid, publicId } = await yubikey.verifyOtp(otp);
+  return valid && config.yubico.allowedPublicIds.includes(publicId);
+}
 
 router.post('/addinvoice', postLimiter, async function (req, res) {
   logger.log('/addinvoice', [req.id]);

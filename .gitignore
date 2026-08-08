@@ -4,6 +4,8 @@ admin.macaroon
 tls.cert
 build/
 logs/
+.env
+.lndhub-session.json
 
 # dependencies
 /node_modules
