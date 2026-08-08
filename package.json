@@ -12,7 +12,8 @@
     "login": "node scripts/login.js login",
     "login:refresh": "node scripts/login.js refresh",
     "login:whoami": "node scripts/login.js whoami",
-    "login:enroll": "node scripts/login.js enroll"
+    "login:enroll": "node scripts/login.js enroll",
+    "yubikey:reset": "node_modules/.bin/babel-node scripts/yubikey_reset.js"
   },
   "author": "Igor Korsakov <overtorment@gmail.com>",
   "license": "MIT",
