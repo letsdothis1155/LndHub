@@ -86,6 +86,22 @@ export class User {
     return await this._redis.set('metadata_for_' + this._userid, JSON.stringify(metadata));
   }
 
+  /**
+   * Registers a verified YubiKey public ID against this account, requiring
+   * it as a second factor on future logins alongside the account password.
+   */
+  async addYubikeyId(publicId) {
+    return await this._redis.sadd('yubikey_ids_for_' + this._userid, publicId);
+  }
+
+  async removeYubikeyId(publicId) {
+    return await this._redis.srem('yubikey_ids_for_' + this._userid, publicId);
+  }
+
+  async getYubikeyIds() {
+    return await this._redis.smembers('yubikey_ids_for_' + this._userid);
+  }
+
   async loadByLoginAndPassword(login, password) {
     let userid = await this._redis.get('user_' + login + '_' + this._hash(password));
 

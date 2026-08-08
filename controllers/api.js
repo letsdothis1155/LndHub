@@ -168,22 +168,61 @@ router.post('/auth', postLimiter, async function (req, res) {
       return errorBadAuth(res);
     }
   } else {
-    // need to authorize user
-    if (config.yubico.requiredForLogins.includes(req.body.login)) {
-      if (!(await verifyYubikey(req.body.yubikey_otp))) return errorBadAuth(res);
+    // need to authorize user; password is checked first so an OTP requirement
+    // is never revealed to (nor exercised by) someone without a valid password
+    let result = await u.loadByLoginAndPassword(req.body.login, req.body.password);
+    if (!result) return errorBadAuth(res);
+
+    const enrolledPublicIds = await u.getYubikeyIds();
+    const otpRequired = enrolledPublicIds.length > 0 || config.yubico.requiredForLogins.includes(req.body.login);
+
+    if (otpRequired) {
+      const { valid, publicId } = await verifyYubikeyOtp(req.body.yubikey_otp);
+      const allowed = valid && (enrolledPublicIds.includes(publicId) || config.yubico.allowedPublicIds.includes(publicId));
+      if (!allowed) return errorBadAuth(res);
     }
 
-    let result = await u.loadByLoginAndPassword(req.body.login, req.body.password);
-    if (result) res.send({ refresh_token: u.getRefreshToken(), access_token: u.getAccessToken() });
-    else errorBadAuth(res);
+    res.send({ refresh_token: u.getRefreshToken(), access_token: u.getAccessToken() });
   }
 });
 
-async function verifyYubikey(otp) {
-  if (!otp) return false;
-  const { valid, publicId } = await yubikey.verifyOtp(otp);
-  return valid && config.yubico.allowedPublicIds.includes(publicId);
+async function verifyYubikeyOtp(otp) {
+  if (!otp) return { valid: false, publicId: null };
+  return await yubikey.verifyOtp(otp);
 }
+
+// Self-service YubiKey enrollment: an already-authenticated account can register
+// a public ID (proven by presenting a valid OTP from it), which then becomes a
+// required second factor for that account's future /auth calls.
+router.post('/yubikey/enroll', postLimiter, async function (req, res) {
+  logger.log('/yubikey/enroll', [req.id]);
+  let u = new User(redis, bitcoinclient, lightning);
+  if (!(await u.loadByAuthorization(req.headers.authorization))) return errorBadAuth(res);
+
+  const { valid, publicId } = await verifyYubikeyOtp(req.body.yubikey_otp);
+  if (!valid) return errorBadArguments(res);
+
+  await u.addYubikeyId(publicId);
+  res.send({ publicId });
+});
+
+router.get('/yubikey', postLimiter, async function (req, res) {
+  logger.log('/yubikey', [req.id]);
+  let u = new User(redis, bitcoinclient, lightning);
+  if (!(await u.loadByAuthorization(req.headers.authorization))) return errorBadAuth(res);
+
+  res.send({ publicIds: await u.getYubikeyIds() });
+});
+
+router.post('/yubikey/remove', postLimiter, async function (req, res) {
+  logger.log('/yubikey/remove', [req.id]);
+  let u = new User(redis, bitcoinclient, lightning);
+  if (!(await u.loadByAuthorization(req.headers.authorization))) return errorBadAuth(res);
+  if (!req.body.publicId) return errorBadArguments(res);
+
+  await u.removeYubikeyId(req.body.publicId);
+  res.send({ removed: req.body.publicId });
+});
 
 router.post('/addinvoice', postLimiter, async function (req, res) {
   logger.log('/addinvoice', [req.id]);

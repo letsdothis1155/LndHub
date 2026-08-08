@@ -11,7 +11,8 @@
     "lint": "./node_modules/.bin/eslint ./ controllers/ class/ --fix",
     "login": "node scripts/login.js login",
     "login:refresh": "node scripts/login.js refresh",
-    "login:whoami": "node scripts/login.js whoami"
+    "login:whoami": "node scripts/login.js whoami",
+    "login:enroll": "node scripts/login.js enroll"
   },
   "author": "Igor Korsakov <overtorment@gmail.com>",
   "license": "MIT",

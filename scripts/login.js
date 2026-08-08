@@ -5,6 +5,7 @@
  *   node scripts/login.js login <login>     interactive login (password + OTP prompts), saves session
  *   node scripts/login.js refresh           refreshes tokens from saved session (no password/OTP needed)
  *   node scripts/login.js whoami            prints the currently saved session
+ *   node scripts/login.js enroll            registers a YubiKey against the logged-in account (2FA going forward)
  *
  * Session (access_token/refresh_token) is cached in .lndhub-session.json (gitignored).
  */
@@ -64,6 +65,15 @@ function loadSession() {
   return JSON.parse(fs.readFileSync(SESSION_FILE, 'utf8'));
 }
 
+async function attemptAuth(body) {
+  const res = await fetch(`${LNDHUB_URL}/auth`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  return { ok: res.ok, json: await res.json() };
+}
+
 async function doLogin(login) {
   if (!login) {
     console.error('usage: node scripts/login.js login <login>');
@@ -71,21 +81,20 @@ async function doLogin(login) {
   }
 
   const password = await readHidden('Password: ');
-  const needsOtp = config.yubico.requiredForLogins.includes(login);
-  const yubikey_otp = needsOtp ? await readHidden('Touch your YubiKey: ') : undefined;
+  // known up front only if this login is in the static override list;
+  // self-enrolled accounts aren't knowable until the server rejects us
+  let yubikey_otp = config.yubico.requiredForLogins.includes(login) ? await readHidden('Touch your YubiKey: ') : undefined;
 
-  const body = { login, password };
-  if (yubikey_otp) body.yubikey_otp = yubikey_otp;
+  let { ok, json } = await attemptAuth({ login, password, yubikey_otp });
 
-  const res = await fetch(`${LNDHUB_URL}/auth`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body),
-  });
-  const json = await res.json();
+  if ((!ok || json.error) && !yubikey_otp) {
+    // account may require a self-enrolled YubiKey we didn't know about; retry once
+    yubikey_otp = await readHidden('Touch your YubiKey: ');
+    ({ ok, json } = await attemptAuth({ login, password, yubikey_otp }));
+  }
 
-  if (!res.ok || json.error) {
-    console.error('Login failed:', json.message || res.statusText);
+  if (!ok || json.error) {
+    console.error('Login failed:', json.message || 'unknown error');
     process.exit(1);
   }
 
@@ -125,13 +134,38 @@ function doWhoami() {
   console.log(JSON.stringify(session, null, 2));
 }
 
+async function doEnroll() {
+  const session = loadSession();
+  if (!session || !session.access_token) {
+    console.error('No saved session. Run: node scripts/login.js login <login>');
+    process.exit(1);
+  }
+
+  const yubikey_otp = await readHidden('Touch your YubiKey to enroll it: ');
+
+  const res = await fetch(`${LNDHUB_URL}/yubikey/enroll`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${session.access_token}` },
+    body: JSON.stringify({ yubikey_otp }),
+  });
+  const json = await res.json();
+
+  if (!res.ok || json.error) {
+    console.error('Enrollment failed:', json.message || res.statusText);
+    process.exit(1);
+  }
+
+  console.log('Enrolled YubiKey with public ID:', json.publicId, '- OTP will now be required on login.');
+}
+
 (async () => {
   const [, , cmd, arg] = process.argv;
   if (cmd === 'login') await doLogin(arg);
   else if (cmd === 'refresh') await doRefresh();
   else if (cmd === 'whoami') doWhoami();
+  else if (cmd === 'enroll') await doEnroll();
   else {
-    console.error('usage: node scripts/login.js <login|refresh|whoami> [login]');
+    console.error('usage: node scripts/login.js <login|refresh|whoami|enroll> [login]');
     process.exit(1);
   }
 })();
