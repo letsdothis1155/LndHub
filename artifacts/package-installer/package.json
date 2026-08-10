@@ -1,0 +1,31 @@
+{
+  "name": "@smart-realty/apk-inspect",
+  "version": "0.1.0",
+  "description": "Dependency-free APK manifest, certificate and safety inspection for the Package Installer.",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "src",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "tsc -p tsconfig.json && node dist/test/run.js",
+    "fixtures": "bash test/make-real-fixtures.sh",
+    "test:integration": "tsc -p tsconfig.json && node dist/test/integration.js"
+  },
+  "sideEffects": false,
+  "license": "MIT",
+  "devDependencies": {
+    "@types/node": "^22.20.1",
+    "typescript": "^5.9.3"
+  }
+}
