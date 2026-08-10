@@ -173,6 +173,7 @@ router.post('/auth', postLimiter, async function (req, res) {
   logger.log('/auth', [req.id]);
   if (!((req.body.login && req.body.password) || req.body.refresh_token)) return errorBadArguments(res);
 
+  const ip = req.ip;
   let u = new User(redis, bitcoinclient, lightning);
 
   if (req.body.refresh_token) {
@@ -180,23 +181,32 @@ router.post('/auth', postLimiter, async function (req, res) {
     if (await u.loadByRefreshToken(req.body.refresh_token)) {
       res.send({ refresh_token: u.getRefreshToken(), access_token: u.getAccessToken() });
     } else {
+      logger.log('AUTH_FAIL', { reason: 'bad_refresh_token', ip });
       return errorBadAuth(res);
     }
   } else {
+    const login = req.body.login;
     // need to authorize user; password is checked first so an OTP requirement
     // is never revealed to (nor exercised by) someone without a valid password
-    let result = await u.loadByLoginAndPassword(req.body.login, req.body.password);
-    if (!result) return errorBadAuth(res);
+    let result = await u.loadByLoginAndPassword(login, req.body.password);
+    if (!result) {
+      logger.log('AUTH_FAIL', { reason: 'bad_credentials', login, ip });
+      return errorBadAuth(res);
+    }
 
     const enrolledPublicIds = await u.getYubikeyIds();
-    const otpRequired = enrolledPublicIds.length > 0 || config.yubico.requiredForLogins.includes(req.body.login);
+    const otpRequired = enrolledPublicIds.length > 0 || config.yubico.requiredForLogins.includes(login);
 
     if (otpRequired) {
       const { valid, publicId } = await verifyYubikeyOtp(req.body.yubikey_otp);
       const allowed = valid && (enrolledPublicIds.includes(publicId) || config.yubico.allowedPublicIds.includes(publicId));
-      if (!allowed) return errorBadAuth(res);
+      if (!allowed) {
+        logger.log('AUTH_FAIL', { reason: 'bad_otp', login, ip });
+        return errorBadAuth(res);
+      }
     }
 
+    logger.log('AUTH_OK', { login, ip, otp: otpRequired });
     res.send({ refresh_token: u.getRefreshToken(), access_token: u.getAccessToken() });
   }
 });
@@ -407,7 +417,7 @@ router.post('/payinvoice', postLimiter, async function (req, res) {
   });
 });
 
-router.get('/getbtc', async function (req, res) {
+router.get('/getbtc', postLimiter, async function (req, res) {
   logger.log('/getbtc', [req.id]);
   let u = new User(redis, bitcoinclient, lightning);
   await u.loadByAuthorization(req.headers.authorization);
@@ -428,7 +438,7 @@ router.get('/getbtc', async function (req, res) {
   res.send([{ address }]);
 });
 
-router.get('/checkpayment/:payment_hash', async function (req, res) {
+router.get('/checkpayment/:payment_hash', postLimiter, async function (req, res) {
   logger.log('/checkpayment', [req.id]);
   let u = new User(redis, bitcoinclient, lightning);
   await u.loadByAuthorization(req.headers.authorization);
@@ -553,7 +563,7 @@ router.get('/decodeinvoice', postLimiter, async function (req, res) {
   });
 });
 
-router.get('/checkrouteinvoice', async function (req, res) {
+router.get('/checkrouteinvoice', postLimiter, async function (req, res) {
   logger.log('/checkrouteinvoice', [req.id]);
   let u = new User(redis, bitcoinclient, lightning);
   if (!(await u.loadByAuthorization(req.headers.authorization))) {
