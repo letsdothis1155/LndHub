@@ -3,7 +3,6 @@ process.on('uncaughtException', function (err) {
   console.log('Node NOT Exiting...');
 });
 
-process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
 let express = require('express');
 const helmet = require('helmet');
 let morgan = require('morgan');
@@ -17,8 +16,28 @@ morgan.token('id', function getId(req) {
 
 let app = express();
 app.enable('trust proxy');
-app.use(helmet.hsts());
-app.use(helmet.hidePoweredBy());
+
+// Security headers. CSP allows only same-origin resources; inline style= is
+// required for the progress-bar width attribute in the dashboard template.
+app.use(
+  helmet({
+    contentSecurityPolicy: {
+      directives: {
+        defaultSrc: ["'self'"],
+        scriptSrc: ["'self'"],
+        styleSrc: ["'self'", "'unsafe-inline'"],
+        imgSrc: ["'self'", 'data:'],
+        connectSrc: ["'self'"],
+        fontSrc: ["'self'"],
+        objectSrc: ["'none'"],
+        frameAncestors: ["'none'"],
+        baseUri: ["'self'"],
+        formAction: ["'self'"],
+      },
+    },
+    crossOriginEmbedderPolicy: false,
+  }),
+);
 
 const rateLimit = require('express-rate-limit');
 const limiter = rateLimit({

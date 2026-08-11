@@ -169,6 +169,27 @@ router.post('/create', postLimiter, async function (req, res) {
   res.send({ login: u.getLogin(), password: u.getPassword() });
 });
 
+// Brute-force protection: 5 consecutive failures lock the account for 15 minutes.
+// The lockout returns the same 401 as a bad password so account existence is not revealed.
+const AUTH_LOCKOUT_THRESHOLD = 5;
+const AUTH_FAIL_WINDOW_S = 15 * 60;
+
+async function checkAuthLockout(login) {
+  const fails = parseInt((await redis.get('auth_fail_' + login)) || '0', 10);
+  return fails >= AUTH_LOCKOUT_THRESHOLD;
+}
+
+async function recordAuthFailure(login) {
+  const key = 'auth_fail_' + login;
+  const newCount = await redis.incr(key);
+  await redis.expire(key, AUTH_FAIL_WINDOW_S);
+  return newCount;
+}
+
+async function clearAuthFailures(login) {
+  await redis.del('auth_fail_' + login);
+}
+
 router.post('/auth', postLimiter, async function (req, res) {
   logger.log('/auth', [req.id]);
   if (!((req.body.login && req.body.password) || req.body.refresh_token)) return errorBadArguments(res);
@@ -186,11 +207,22 @@ router.post('/auth', postLimiter, async function (req, res) {
     }
   } else {
     const login = req.body.login;
-    // need to authorize user; password is checked first so an OTP requirement
-    // is never revealed to (nor exercised by) someone without a valid password
+
+    if (await checkAuthLockout(login)) {
+      logger.log('AUTH_LOCKOUT', { login, ip });
+      return errorBadAuth(res);
+    }
+
+    // password is checked first so an OTP requirement is never revealed to
+    // (nor exercised by) someone without a valid password
     let result = await u.loadByLoginAndPassword(login, req.body.password);
     if (!result) {
-      logger.log('AUTH_FAIL', { reason: 'bad_credentials', login, ip });
+      const fails = await recordAuthFailure(login);
+      if (fails >= AUTH_LOCKOUT_THRESHOLD) {
+        logger.log('AUTH_LOCKOUT_SET', { login, ip, fails });
+      } else {
+        logger.log('AUTH_FAIL', { reason: 'bad_credentials', login, ip, fails });
+      }
       return errorBadAuth(res);
     }
 
@@ -201,11 +233,13 @@ router.post('/auth', postLimiter, async function (req, res) {
       const { valid, publicId } = await verifyYubikeyOtp(req.body.yubikey_otp);
       const allowed = valid && (enrolledPublicIds.includes(publicId) || config.yubico.allowedPublicIds.includes(publicId));
       if (!allowed) {
-        logger.log('AUTH_FAIL', { reason: 'bad_otp', login, ip });
+        const fails = await recordAuthFailure(login);
+        logger.log('AUTH_FAIL', { reason: 'bad_otp', login, ip, fails });
         return errorBadAuth(res);
       }
     }
 
+    await clearAuthFailures(login);
     logger.log('AUTH_OK', { login, ip, otp: otpRequired });
     res.send({ refresh_token: u.getRefreshToken(), access_token: u.getAccessToken() });
   }
@@ -623,7 +657,7 @@ module.exports = router;
 // ################# HELPERS ###########################
 
 function errorBadAuth(res) {
-  return res.send({
+  return res.status(401).send({
     error: true,
     code: 1,
     message: 'bad auth',
@@ -631,7 +665,7 @@ function errorBadAuth(res) {
 }
 
 function errorNotEnougBalance(res) {
-  return res.send({
+  return res.status(403).send({
     error: true,
     code: 2,
     message: 'not enough balance. Make sure you have at least 1% reserved for potential fees',
@@ -639,7 +673,7 @@ function errorNotEnougBalance(res) {
 }
 
 function errorNotAValidInvoice(res) {
-  return res.send({
+  return res.status(422).send({
     error: true,
     code: 4,
     message: 'not a valid invoice',
@@ -647,15 +681,15 @@ function errorNotAValidInvoice(res) {
 }
 
 function errorLnd(res) {
-  return res.send({
+  return res.status(503).send({
     error: true,
     code: 7,
-    message: 'LND failue',
+    message: 'LND failure',
   });
 }
 
 function errorGeneralServerError(res) {
-  return res.send({
+  return res.status(500).send({
     error: true,
     code: 6,
     message: 'Something went wrong. Please try again later',
@@ -663,7 +697,7 @@ function errorGeneralServerError(res) {
 }
 
 function errorBadArguments(res) {
-  return res.send({
+  return res.status(400).send({
     error: true,
     code: 8,
     message: 'Bad arguments',
@@ -671,7 +705,7 @@ function errorBadArguments(res) {
 }
 
 function errorTryAgainLater(res) {
-  return res.send({
+  return res.status(429).send({
     error: true,
     code: 9,
     message: 'Your previous payment is in transit. Try again in 5 minutes',
@@ -679,7 +713,7 @@ function errorTryAgainLater(res) {
 }
 
 function errorPaymentFailed(res) {
-  return res.send({
+  return res.status(400).send({
     error: true,
     code: 10,
     message: 'Payment failed. Does the receiver have enough inbound capacity?',
@@ -687,7 +721,7 @@ function errorPaymentFailed(res) {
 }
 
 function errorSunset(res) {
-  return res.send({
+  return res.status(410).send({
     error: true,
     code: 11,
     message: 'This LNDHub instance is not accepting any more users',
@@ -695,7 +729,7 @@ function errorSunset(res) {
 }
 
 function errorSunsetAddInvoice(res) {
-  return res.send({
+  return res.status(410).send({
     error: true,
     code: 11,
     message: 'This LNDHub instance is scheduled to shut down. Withdraw any remaining funds',
