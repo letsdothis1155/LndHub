@@ -491,10 +491,15 @@ export class User {
     buffer = crypto.randomBytes(20);
     this._refresh_token = buffer.toString('hex');
 
-    await this._redis.set('userid_for_' + this._acess_token, this._userid);
-    await this._redis.set('userid_for_' + this._refresh_token, this._userid);
-    await this._redis.set('access_token_for_' + this._userid, this._acess_token);
-    await this._redis.set('refresh_token_for_' + this._userid, this._refresh_token);
+    // Access tokens expire in 1 hour; refresh tokens rotate on use and expire in 30 days.
+    // Short-lived access tokens limit exposure if a bearer token leaks.
+    const ACCESS_TTL = 3600;
+    const REFRESH_TTL = 30 * 24 * 3600;
+
+    await this._redis.set('userid_for_' + this._acess_token, this._userid, 'EX', ACCESS_TTL);
+    await this._redis.set('userid_for_' + this._refresh_token, this._userid, 'EX', REFRESH_TTL);
+    await this._redis.set('access_token_for_' + this._userid, this._acess_token, 'EX', ACCESS_TTL);
+    await this._redis.set('refresh_token_for_' + this._userid, this._refresh_token, 'EX', REFRESH_TTL);
   }
 
   async _saveUserToDatabase() {

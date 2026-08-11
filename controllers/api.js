@@ -5,8 +5,21 @@ let express = require('express');
 let router = express.Router();
 let logger = require('../utils/logger');
 const MIN_BTC_BLOCK = 670000;
+
+// Redacts credentials before the startup config gets logged - the raw
+// config carries the bitcoind RPC password, Redis password, and LND
+// wallet password, none of which belong in stdout/log aggregators.
+function redactConfigForLogging(cfg) {
+  return {
+    ...cfg,
+    bitcoind: cfg.bitcoind && { ...cfg.bitcoind, rpc: cfg.bitcoind.rpc && cfg.bitcoind.rpc.replace(/:[^:@/]+@/, ':***@') },
+    redis: cfg.redis && { ...cfg.redis, password: cfg.redis.password ? '***' : cfg.redis.password },
+    lnd: cfg.lnd && { ...cfg.lnd, password: cfg.lnd.password ? '***' : cfg.lnd.password },
+  };
+}
+
 if (process.env.NODE_ENV !== 'prod') {
-  console.log('using config', JSON.stringify(config));
+  console.log('using config', JSON.stringify(redactConfigForLogging(config)));
 }
 
 var Redis = require('ioredis');
@@ -339,7 +352,7 @@ router.post('/payinvoice', postLimiter, async function (req, res) {
   });
 });
 
-router.get('/getbtc', async function (req, res) {
+router.get('/getbtc', postLimiter, async function (req, res) {
   logger.log('/getbtc', [req.id]);
   let u = new User(redis, bitcoinclient, lightning);
   await u.loadByAuthorization(req.headers.authorization);
@@ -360,7 +373,7 @@ router.get('/getbtc', async function (req, res) {
   res.send([{ address }]);
 });
 
-router.get('/checkpayment/:payment_hash', async function (req, res) {
+router.get('/checkpayment/:payment_hash', postLimiter, async function (req, res) {
   logger.log('/checkpayment', [req.id]);
   let u = new User(redis, bitcoinclient, lightning);
   await u.loadByAuthorization(req.headers.authorization);
@@ -485,7 +498,7 @@ router.get('/decodeinvoice', postLimiter, async function (req, res) {
   });
 });
 
-router.get('/checkrouteinvoice', async function (req, res) {
+router.get('/checkrouteinvoice', postLimiter, async function (req, res) {
   logger.log('/checkrouteinvoice', [req.id]);
   let u = new User(redis, bitcoinclient, lightning);
   if (!(await u.loadByAuthorization(req.headers.authorization))) {
@@ -502,8 +515,13 @@ router.get('/checkrouteinvoice', async function (req, res) {
   });
 });
 
-router.get('/queryroutes/:source/:dest/:amt', async function (req, res) {
+router.get('/queryroutes/:source/:dest/:amt', postLimiter, async function (req, res) {
   logger.log('/queryroutes', [req.id]);
+
+  let u = new User(redis, bitcoinclient, lightning);
+  if (!(await u.loadByAuthorization(req.headers.authorization))) {
+    return errorBadAuth(res);
+  }
 
   let request = {
     pub_key: req.params.dest,
@@ -517,8 +535,13 @@ router.get('/queryroutes/:source/:dest/:amt', async function (req, res) {
   });
 });
 
-router.get('/getchaninfo/:chanid', async function (req, res) {
+router.get('/getchaninfo/:chanid', postLimiter, async function (req, res) {
   logger.log('/getchaninfo', [req.id]);
+
+  let u = new User(redis, bitcoinclient, lightning);
+  if (!(await u.loadByAuthorization(req.headers.authorization))) {
+    return errorBadAuth(res);
+  }
 
   if (lightningDescribeGraph && lightningDescribeGraph.edges) {
     for (const edge of lightningDescribeGraph.edges) {
