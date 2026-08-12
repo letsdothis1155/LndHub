@@ -423,6 +423,24 @@ router.post('/payinvoice', postLimiter, async function (req, res) {
       // else - regular lightning network payment:
 
       var call = lightning.sendPayment();
+
+      // A transport failure, or LND going away mid-payment, arrives as an
+      // 'error' event. With no listener for it the event throws instead: the
+      // HTTP request then never answers at all, leaving the caller unable to
+      // tell whether their payment went out, and the per-user lock held for its
+      // full five minutes so they cannot retry either.
+      //
+      // Release the lock and answer. Deliberately NOT unlockFunds(): a stream
+      // error means the payment's fate is unknown, it may still be in flight,
+      // and scripts/process-locked-payments.js exists to reconcile exactly
+      // that. Freeing the funds here on an unknown outcome is how you spend
+      // them twice.
+      call.on('error', async function (err) {
+        logger.log('/payinvoice', [req.id, 'sendPayment stream error:', err && err.message]);
+        await lock.releaseLock();
+        if (!res.headersSent) return errorLnd(res);
+      });
+
       call.on('data', async function (payment) {
         // payment callback
         await u.unlockFunds(req.body.invoice);
