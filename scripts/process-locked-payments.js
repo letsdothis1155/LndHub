@@ -19,11 +19,28 @@ let bitcoinclient = require('../bitcoin');
 let lightning = require('../lightning');
 
 (async () => {
-  let keys = await redis.keys('locked_payments_for_*');
-  keys = User._shuffle(keys);
+  // SCAN, not KEYS: redis is single-threaded and KEYS walks the entire keyspace
+  // in one blocking call. This script runs against the same instance that is
+  // serving live payment requests, so a KEYS here stalls the hub for as long as
+  // the sweep takes. SCAN gives up the thread between batches - the cursor can
+  // miss keys created mid-sweep, which is fine, since a payment locked while we
+  // are running is by definition too new to reconcile and gets picked up next
+  // run. (scripts/set_password.js uses the same pattern.)
+  let keys = [];
+  let cursor = '0';
+  do {
+    const [next, batch] = await redis.scan(cursor, 'MATCH', 'locked_payments_for_*', 'COUNT', 1000);
+    cursor = next;
+    keys.push(...batch);
+  } while (cursor !== '0');
+  // SCAN can return the same key twice across batches
+  keys = User._shuffle([...new Set(keys)]);
 
   console.log('fetching listPayments...');
   let tempPaym = new Paym(redis, bitcoinclient, lightning);
+  // include_incomplete stays at its default of false on purpose: it would pull
+  // in pending AND failed payments, and everything found here is treated as
+  // successfully paid. Turning it on would book failed payments as spends.
   let listPayments = await tempPaym.listPayments();
   // DEBUG let listPayments = JSON.parse(fs.readFileSync('listpayments.txt').toString('ascii'));
   console.log('done', 'got', listPayments['payments'].length, 'payments');
