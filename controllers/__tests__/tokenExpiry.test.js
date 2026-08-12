@@ -113,3 +113,46 @@ describe('token TTLs', () => {
     expect(refreshTtl).toBeGreaterThan(0);
   });
 });
+
+/**
+ * Refresh tokens are single-use. Issuing a new pair is not on its own a security
+ * property - if the presented token stays valid, a stolen refresh token keeps
+ * working for its full 30-day life however often the real client rotates, and
+ * the user has no way to end the session (there is no logout).
+ */
+describe('refresh token is spent when used', () => {
+  let login, password;
+
+  afterAll(async () => {
+    await cleanupUser(login, password);
+  });
+
+  it('the used refresh token is rejected afterwards, and its Redis key is gone', async () => {
+    let first;
+    ({ login, password, ...first } = await createAndLogin());
+
+    const rotated = await request(app).post('/auth').send({ refresh_token: first.refresh_token });
+    expect(rotated.status).toBe(200);
+    expect(rotated.body.refresh_token).toBeTruthy();
+    expect(rotated.body.refresh_token).not.toBe(first.refresh_token);
+
+    const replay = await request(app).post('/auth').send({ refresh_token: first.refresh_token });
+    expect(replay.status).toBe(401);
+    expect(replay.body).toEqual(expect.objectContaining({ error: true, code: 1 }));
+    expect(replay.body.access_token).toBeUndefined();
+
+    expect(await redis.get('userid_for_' + first.refresh_token)).toBeNull();
+  });
+
+  it('the replacement refresh token still works (rotation did not break the chain)', async () => {
+    const session = await createAndLogin();
+    const second = await request(app).post('/auth').send({ refresh_token: session.refresh_token });
+    const third = await request(app).post('/auth').send({ refresh_token: second.body.refresh_token });
+
+    expect(third.status).toBe(200);
+    expect(third.body.access_token).toBeTruthy();
+    expect(third.body.refresh_token).toBeTruthy();
+
+    await cleanupUser(session.login, session.password);
+  });
+});

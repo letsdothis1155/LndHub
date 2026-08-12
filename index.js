@@ -15,7 +15,13 @@ morgan.token('id', function getId(req) {
 });
 
 let app = express();
-app.enable('trust proxy');
+
+// Off unless explicitly configured: with it on, req.ip is taken from a header
+// the client controls, so rate limits can be sidestepped by rotating
+// X-Forwarded-For. Set TRUST_PROXY=1 (or the real hop count) when running
+// behind a reverse proxy. See utils/trustProxy.js.
+const { parseTrustProxy } = require('./utils/trustProxy');
+app.set('trust proxy', parseTrustProxy(process.env.TRUST_PROXY));
 
 // Security headers. CSP allows only same-origin resources; inline style= is
 // required for the progress-bar width attribute in the dashboard template.

@@ -77,10 +77,20 @@ describe('every non-public route requires authentication', () => {
     expect(protectedRoutes.length).toBeGreaterThan(5);
   });
 
+  // Asserting specifically on the *auth* error, not merely on `error: true`.
+  // A bare truthy-error check passes for any failure at all, so a route that
+  // lost its auth check but happened to reject the empty test body with
+  // errorBadArguments would still look covered - which is exactly the blind
+  // spot this file exists to close.
+  const expectBadAuth = (res) => {
+    expect(res.status).toBe(401);
+    expect(res.body).toEqual(expect.objectContaining({ error: true, code: 1 }));
+  };
+
   describe.each(protectedRoutes)('$method $path', (route) => {
     it('rejects a request with no Authorization header', async () => {
       const res = await request(app)[route.method](concretePath(route.path)).send({});
-      expect(res.body).toEqual(expect.objectContaining({ error: true }));
+      expectBadAuth(res);
     });
 
     it('rejects a request with a bogus bearer token', async () => {
@@ -88,7 +98,7 @@ describe('every non-public route requires authentication', () => {
         [route.method](concretePath(route.path))
         .set('Authorization', 'Bearer not-a-real-token-at-all')
         .send({});
-      expect(res.body).toEqual(expect.objectContaining({ error: true }));
+      expectBadAuth(res);
     });
   });
 });

@@ -14,7 +14,11 @@ const MIN_BTC_BLOCK = 670000;
 function redactConfigForLogging(cfg) {
   return {
     ...cfg,
-    bitcoind: cfg.bitcoind && { ...cfg.bitcoind, rpc: cfg.bitcoind.rpc && cfg.bitcoind.rpc.replace(/:[^:@/]+@/, ':***@') },
+    // Anchored to the userinfo section, and greedy to the LAST '@' before the
+    // host so a password containing '@' is redacted whole instead of leaving
+    // its tail in the log. Excluding '/' keeps the match from running past the
+    // host into a path that happens to contain '@'.
+    bitcoind: cfg.bitcoind && { ...cfg.bitcoind, rpc: cfg.bitcoind.rpc && cfg.bitcoind.rpc.replace(/\/\/([^:/]+):([^/]*)@/, '//$1:***@') },
     redis: cfg.redis && { ...cfg.redis, password: cfg.redis.password ? '***' : cfg.redis.password },
     lnd: cfg.lnd && { ...cfg.lnd, password: cfg.lnd.password ? '***' : cfg.lnd.password },
     yubico: cfg.yubico && { ...cfg.yubico, secretKey: cfg.yubico.secretKey ? '***' : cfg.yubico.secretKey },

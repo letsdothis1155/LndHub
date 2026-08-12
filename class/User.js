@@ -61,6 +61,12 @@ export class User {
     if (userid) {
       this._userid = userid;
       await this._generateTokens();
+      // The presented refresh token is spent: a refresh token has to be usable
+      // exactly once, or a stolen one keeps working for its full 30-day life no
+      // matter how often the legitimate client rotates. Deleted only after the
+      // replacement pair is committed, so an interruption here leaves the caller
+      // with a working session rather than none.
+      await this._redis.del('userid_for_' + refresh_token);
       return true;
     }
 
@@ -507,8 +513,11 @@ export class User {
     buffer = crypto.randomBytes(20);
     this._refresh_token = buffer.toString('hex');
 
-    // Access tokens expire in 1 hour; refresh tokens rotate on use and expire in 30 days.
-    // Short-lived access tokens limit exposure if a bearer token leaks.
+    // Access tokens expire in 1 hour; refresh tokens expire in 30 days and are
+    // single-use (see loadByRefreshToken, which spends the one it was given).
+    // A superseded access token is deliberately NOT revoked here - it belongs to
+    // whichever session minted it, and other sessions hold their own. Its 1-hour
+    // TTL is what bounds the exposure of a leaked one.
     const ACCESS_TTL = 3600;
     const REFRESH_TTL = 30 * 24 * 3600;
 

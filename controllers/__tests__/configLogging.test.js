@@ -6,13 +6,15 @@
  * appear in the logged output, using synthetic secrets (never the real
  * ones).
  */
-const SYNTHETIC_BITCOIND_PASSWORD = 'super-secret-bitcoind-password';
+// deliberately contains '@' and ':' - the characters that make naive redaction
+// of a URL's userinfo section leak the tail of the password
+const SYNTHETIC_BITCOIND_PASSWORD = 'sup@r:secret-bitcoind-p@ssword';
 const SYNTHETIC_REDIS_PASSWORD = 'super-secret-redis-password';
 const SYNTHETIC_LND_PASSWORD = 'super-secret-lnd-wallet-password';
 const SYNTHETIC_YUBICO_SECRET = 'super-secret-yubico-key';
 
 jest.mock('../../config', () => ({
-  bitcoind: { rpc: `http://rpcuser:${'super-secret-bitcoind-password'}@127.0.0.1:8332` },
+  bitcoind: { rpc: `http://rpcuser:${'sup@r:secret-bitcoind-p@ssword'}@127.0.0.1:8332` },
   redis: { port: 6379, host: '127.0.0.1', family: 4, db: 0, password: 'super-secret-redis-password' },
   lnd: { url: 'localhost:10009', password: 'super-secret-lnd-wallet-password' },
   yubico: {
@@ -55,4 +57,12 @@ it('never logs raw secrets from config at startup, in any non-prod environment',
   expect(loggedText).not.toContain(SYNTHETIC_YUBICO_SECRET);
   // and confirms it's actually redacting, not just omitting the config log entirely
   expect(loggedText).toContain('***');
+  // the whole password goes, not just the part before its first '@' - and the
+  // host survives, so the log stays useful for debugging
+  expect(loggedText).toContain('//rpcuser:***@127.0.0.1:8332');
+  // fragments distinctive to the password itself - the naive redaction this
+  // guards against left everything after the password's first '@' in the log.
+  // (Don't assert on 'ssword': it is a substring of the "password" key names.)
+  expect(loggedText).not.toContain('secret-bitcoind');
+  expect(loggedText).not.toContain('p@ssword');
 });
