@@ -72,11 +72,20 @@ app.use('/static', express.static('static'));
 app.use(require('./controllers/api'));
 app.use(require('./controllers/website'));
 
-const bindHost = process.env.HOST || '0.0.0.0';
+// Loopback by default. This is a custodial wallet API: the cost of a wrong
+// default is asymmetric - binding 0.0.0.0 because someone forgot to set HOST
+// exposes everyone's funds to the LAN, while binding 127.0.0.1 when they wanted
+// LAN access is a connection-refused they will notice immediately and can fix
+// with HOST. Exposing it is a deliberate choice, so make it a deliberate edit.
+const bindHost = process.env.HOST || '127.0.0.1';
 const bindPort = process.env.PORT || 3000;
 
 let server = app.listen(bindPort, bindHost, function () {
   logger.log('BOOTING UP', 'Listening on ' + bindHost + ':' + bindPort);
+  if (bindHost === '127.0.0.1' || bindHost === 'localhost') {
+    // the "why can't my phone reach it" answer, before it gets debugged as a bug
+    logger.log('BOOTING UP', 'Loopback only - not reachable from the LAN. Set HOST to change this.');
+  }
   logger.log('using GroundControl', process.env.GROUNDCONTROL);
 });
 module.exports = server;

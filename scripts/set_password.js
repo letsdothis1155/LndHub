@@ -148,5 +148,22 @@ function readHidden(promptText) {
   console.log(`Removed ${stale.length} old password entr${stale.length === 1 ? 'y' : 'ies'}.`);
   console.log('\nDone. Note any enrolled YubiKey is still required on login (see scripts/yubikey_reset.js).');
 
+  // Changing the password does not touch tokens: they live in their own
+  // `userid_for_<token>` keys with no index back to the account, so there is
+  // nothing here to revoke without scanning the keyspace. That is fine for a
+  // routine change and wrong for a compromise, and the operator is the only one
+  // who knows which this is - so say it plainly rather than implying the account
+  // is now sealed.
+  // point the suggested command at the same redis this script just wrote to,
+  // so it cannot silently operate on db 0 of the wrong server
+  const cli = `redis-cli -h ${config.redis.host} -p ${config.redis.port} -n ${config.redis.db || 0}`;
+  console.log('\nExisting sessions are NOT signed out. Any access token stays valid for up to');
+  console.log('1 hour and any refresh token for up to 30 days from when it was issued.');
+  console.log('If you are resetting because the account may be compromised, that window is');
+  console.log("the exposure - watch the balance over it, or flush this account's tokens:");
+  console.log(`  ${cli} --scan --pattern 'userid_for_*' | while read -r k; do`);
+  console.log(`    [ "$(${cli} get "$k")" = "${userid}" ] && ${cli} del "$k"`);
+  console.log('  done');
+
   process.exit(0);
 })();
