@@ -31,11 +31,21 @@ if (process.env.NODE_ENV !== 'prod') {
 
 var Redis = require('ioredis');
 var redis = new Redis(config.redis);
-redis.monitor(function (err, monitor) {
-  monitor.on('monitor', function (time, args, source, database) {
-    // console.log('REDIS', JSON.stringify(args));
+
+// Opt-in, because MONITOR is not free: it opens a second connection that
+// receives every command executed on the server, by every client. This was
+// running unconditionally with its handler commented out, so each process paid
+// for the whole firehose and threw it away. Under jest that is the dominant
+// cost - every test file is another subscriber to every other file's traffic -
+// and it is what makes overlapping runs time out. Set REDIS_MONITOR=1 to debug.
+if (process.env.REDIS_MONITOR) {
+  redis.monitor(function (err, monitor) {
+    if (err) return console.error('redis monitor failed to start:', err);
+    monitor.on('monitor', function (time, args) {
+      console.log('REDIS', JSON.stringify(args));
+    });
   });
-});
+}
 
 /****** START SET FEES FROM CONFIG AT STARTUP ******/
 /** GLOBALS */
