@@ -100,13 +100,22 @@ router.get('/', function (req, res) {
   return res.status(200).send(mustache.render(html, Object.assign({}, lightningGetInfo, lightningListChannels)));
 });
 
+// The QR encodes a `bluewallet:setlndhuburl` deep link - scanning it tells a
+// wallet which server to send its requests to. Deriving that origin from the
+// request's own Host header means the target is whatever the caller put in a
+// header, so a poisoned cache or a proxy passing Host through unchecked can
+// hand someone a QR pointing at a server that isn't this one. PUBLIC_URL pins
+// it. Without it we still fall back to the header, because there is nothing
+// else to use, but a configured deployment should not rely on that.
+function selfOrigin(req) {
+  if (process.env.PUBLIC_URL) return process.env.PUBLIC_URL.replace(/\/+$/, '');
+  if (process.env.TOR_URL) return req.protocol + '://' + process.env.TOR_URL;
+  return req.protocol + '://' + req.headers.host;
+}
+
 router.get('/qr', function (req, res) {
-  let host = req.headers.host;
-  if (process.env.TOR_URL) {
-    host = process.env.TOR_URL;
-  }
   const customPath = req.url.replace('/qr', '');
-  const url = 'bluewallet:setlndhuburl?url=' + encodeURIComponent(req.protocol + '://' + host + customPath);
+  const url = 'bluewallet:setlndhuburl?url=' + encodeURIComponent(selfOrigin(req) + customPath);
   var code = qr.image(url, { type: 'png' });
   res.setHeader('Content-type', 'image/png');
   code.pipe(res);
