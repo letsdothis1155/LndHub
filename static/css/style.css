@@ -19,7 +19,7 @@ body {
     height: 100%;
     width: 100%;
 }
-.sidebar { 
+.sidebar {
 	background: #fff;
 	box-shadow: 0 -1px 4px 0 rgba(0,0,0,.20);
 }
@@ -37,7 +37,9 @@ body {
 	padding-left: 0;
 }
 .boxes {
-	display: flex;
+	display: grid;
+	grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+	gap: 20px;
 	margin: 40px 0 56px 0;
 }
 .box {
@@ -45,10 +47,6 @@ body {
 	box-shadow: 0 1px 4px 0 rgba(0,0,0,.12);
 	border-radius: 6px;
 	position: relative;
-}
-.boxes .box {
-	width: 25%;
-	margin-right: 32px;
 }
 
 .box h3 {
@@ -83,6 +81,7 @@ body {
 	border-radius: 16px;
 	color: #fff;
 	font-size: 13px;
+	white-space: nowrap;
 }
 [title~=true], [title~=active] {
   background: #50E3C2;
@@ -130,31 +129,52 @@ body {
 	transition-property: width, background-color;
 	-webkit-appearance: none;
 }
+
+/* Channel rows: flex + wrap at every width, so name/status share the top
+   line and the graph wraps to its own full-width line on narrow screens,
+   collapsing to a single inline row once there's room (see min-width:1200
+   override below). Replaces an earlier version that only applied flexbox
+   above 1200px but declared flex-grow on children at all widths - those
+   properties did nothing on a block-level parent below that breakpoint. */
 .row {
-	padding: 8px 0;
+	padding: 10px 0;
 	border-radius: 8px;
 	transition: 0.2s ease-in-out;
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	column-gap: 16px;
+	row-gap: 8px;
 }
 .row:hover {
 	background: #F4F8FB;
 }
 .row .name {
-  	padding: 2px 4px 2px 8px;
+	order: 1;
+	/* basis 0, not auto: an unbroken 64-char pubkey's natural content width
+	   would otherwise make the wrap algorithm treat this item as already
+	   too wide for the line, pushing .status onto its own line even when
+	   there's plenty of room once this item shrinks/truncates. */
+	flex: 1 1 0%;
+	min-width: 0;
+	padding: 2px 4px 2px 8px;
 }
 .row .name h2 {
 	white-space: nowrap;
   	overflow: hidden;
   	text-overflow: ellipsis;
 }
-.row .graph {
-	flex-grow: 1;
-	padding: 0 16px 0 0;
-	align-self: center;
-	padding: 2px 4px;
-}
 .row .status {
+	order: 2;
+	flex: 0 0 auto;
 	align-self: center;
 	padding: 2px 8px 2px 4px;
+}
+.row .graph {
+	order: 3;
+	flex: 1 1 100%;
+	align-self: center;
+	padding: 2px 4px;
 }
 .decor {
 	text-decoration : none;
@@ -171,8 +191,10 @@ body {
 	font-weight: 500;
 }
 .qr {
-	margin: 0 -24px; 
-	width: 268px
+	margin: 0 -24px;
+	width: 268px;
+	max-width: 100%;
+	height: auto;
 }
 footer {
 	color: #9AA0AA;
@@ -180,7 +202,7 @@ footer {
 footer a {
 	font-size: 14px;
 	color: #0070FF;
-	text-decoration: none; 
+	text-decoration: none;
 }
 @media (min-width: 1200px){
  	body {
@@ -190,7 +212,7 @@ footer a {
 		position: fixed;
 		top: 0;
 		right: 0;
-		width: 300px; 
+		width: 300px;
 		height: 100%;
 		box-shadow: 0 0 4px 0 rgba(0,0,0,.20);
 	}
@@ -199,55 +221,29 @@ footer a {
 		bottom: 32px;
 		color: #9AA0AA;
 	}
-	.boxes .box:last-child {
-		margin-right: 0;
-	}
 	.row {
-		display: flex;
+		flex-wrap: nowrap;
 	}
 	.row .name {
-		flex-grow: 0.2;
-		max-width: 20%;
+		order: 1;
+		flex: 0 1 260px;
+		max-width: 260px;
+	}
+	.row .graph {
+		order: 2;
+		flex: 1 1 auto;
 	}
 	.row .status {
-		flex-grow: 0.1;
-		max-width: 10%;
+		order: 3;
 	}
 }
 @media (max-width: 1199px){
 	.logo {
 		width: 200px;
 	}
-	.scroll {
-		overflow: scroll;
-		padding: 0px 16px 0px 1px;
-		margin-right: -32px;
-	}
-	.boxes {
-		width: 900px;
-	}
-	.boxes .box {
-		width: 180px;
-		
-	}
-	.row {
-		position: relative;
-	}
-	.row .name {
-		flex-grow: 0.8;
-		max-width: 80%;
-	}
-	.row .status {
-		position: absolute;
-		top: 16px;
-		right: 0;
+}
+@media (max-width: 480px){
+	.container32 {
+		padding: 20px;
 	}
 }
-@media (max-width: 959px){
-	.logo {
-		width: 200px;
-	}
-
-}
-
-

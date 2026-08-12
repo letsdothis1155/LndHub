@@ -6,17 +6,46 @@ let express = require('express');
 let router = express.Router();
 let logger = require('../utils/logger');
 const MIN_BTC_BLOCK = 670000;
+
+// Redacts credentials before the startup config gets logged - the raw
+// config carries the bitcoind RPC password, Redis password, LND wallet
+// password, and Yubico secret key, none of which belong in
+// stdout/log aggregators.
+function redactConfigForLogging(cfg) {
+  return {
+    ...cfg,
+    // Anchored to the userinfo section, and greedy to the LAST '@' before the
+    // host so a password containing '@' is redacted whole instead of leaving
+    // its tail in the log. Excluding '/' keeps the match from running past the
+    // host into a path that happens to contain '@'.
+    bitcoind: cfg.bitcoind && { ...cfg.bitcoind, rpc: cfg.bitcoind.rpc && cfg.bitcoind.rpc.replace(/\/\/([^:/]+):([^/]*)@/, '//$1:***@') },
+    redis: cfg.redis && { ...cfg.redis, password: cfg.redis.password ? '***' : cfg.redis.password },
+    lnd: cfg.lnd && { ...cfg.lnd, password: cfg.lnd.password ? '***' : cfg.lnd.password },
+    yubico: cfg.yubico && { ...cfg.yubico, secretKey: cfg.yubico.secretKey ? '***' : cfg.yubico.secretKey },
+  };
+}
+
 if (process.env.NODE_ENV !== 'prod') {
-  console.log('using config', JSON.stringify(config));
+  console.log('using config', JSON.stringify(redactConfigForLogging(config)));
 }
 
 var Redis = require('ioredis');
 var redis = new Redis(config.redis);
-redis.monitor(function (err, monitor) {
-  monitor.on('monitor', function (time, args, source, database) {
-    // console.log('REDIS', JSON.stringify(args));
+
+// Opt-in, because MONITOR is not free: it opens a second connection that
+// receives every command executed on the server, by every client. This was
+// running unconditionally with its handler commented out, so each process paid
+// for the whole firehose and threw it away. Under jest that is the dominant
+// cost - every test file is another subscriber to every other file's traffic -
+// and it is what makes overlapping runs time out. Set REDIS_MONITOR=1 to debug.
+if (process.env.REDIS_MONITOR) {
+  redis.monitor(function (err, monitor) {
+    if (err) return console.error('redis monitor failed to start:', err);
+    monitor.on('monitor', function (time, args) {
+      console.log('REDIS', JSON.stringify(args));
+    });
   });
-});
+}
 
 /****** START SET FEES FROM CONFIG AT STARTUP ******/
 /** GLOBALS */
@@ -154,10 +183,32 @@ router.post('/create', postLimiter, async function (req, res) {
   res.send({ login: u.getLogin(), password: u.getPassword() });
 });
 
+// Brute-force protection: 5 consecutive failures lock the account for 15 minutes.
+// The lockout returns the same 401 as a bad password so account existence is not revealed.
+const AUTH_LOCKOUT_THRESHOLD = 5;
+const AUTH_FAIL_WINDOW_S = 15 * 60;
+
+async function checkAuthLockout(login) {
+  const fails = parseInt((await redis.get('auth_fail_' + login)) || '0', 10);
+  return fails >= AUTH_LOCKOUT_THRESHOLD;
+}
+
+async function recordAuthFailure(login) {
+  const key = 'auth_fail_' + login;
+  const newCount = await redis.incr(key);
+  await redis.expire(key, AUTH_FAIL_WINDOW_S);
+  return newCount;
+}
+
+async function clearAuthFailures(login) {
+  await redis.del('auth_fail_' + login);
+}
+
 router.post('/auth', postLimiter, async function (req, res) {
   logger.log('/auth', [req.id]);
   if (!((req.body.login && req.body.password) || req.body.refresh_token)) return errorBadArguments(res);
 
+  const ip = req.ip;
   let u = new User(redis, bitcoinclient, lightning);
 
   if (req.body.refresh_token) {
@@ -165,23 +216,45 @@ router.post('/auth', postLimiter, async function (req, res) {
     if (await u.loadByRefreshToken(req.body.refresh_token)) {
       res.send({ refresh_token: u.getRefreshToken(), access_token: u.getAccessToken() });
     } else {
+      logger.log('AUTH_FAIL', { reason: 'bad_refresh_token', ip });
       return errorBadAuth(res);
     }
   } else {
-    // need to authorize user; password is checked first so an OTP requirement
-    // is never revealed to (nor exercised by) someone without a valid password
-    let result = await u.loadByLoginAndPassword(req.body.login, req.body.password);
-    if (!result) return errorBadAuth(res);
+    const login = req.body.login;
+
+    if (await checkAuthLockout(login)) {
+      logger.log('AUTH_LOCKOUT', { login, ip });
+      return errorBadAuth(res);
+    }
+
+    // password is checked first so an OTP requirement is never revealed to
+    // (nor exercised by) someone without a valid password
+    let result = await u.loadByLoginAndPassword(login, req.body.password);
+    if (!result) {
+      const fails = await recordAuthFailure(login);
+      if (fails >= AUTH_LOCKOUT_THRESHOLD) {
+        logger.log('AUTH_LOCKOUT_SET', { login, ip, fails });
+      } else {
+        logger.log('AUTH_FAIL', { reason: 'bad_credentials', login, ip, fails });
+      }
+      return errorBadAuth(res);
+    }
 
     const enrolledPublicIds = await u.getYubikeyIds();
-    const otpRequired = enrolledPublicIds.length > 0 || config.yubico.requiredForLogins.includes(req.body.login);
+    const otpRequired = enrolledPublicIds.length > 0 || config.yubico.requiredForLogins.includes(login);
 
     if (otpRequired) {
       const { valid, publicId } = await verifyYubikeyOtp(req.body.yubikey_otp);
       const allowed = valid && (enrolledPublicIds.includes(publicId) || config.yubico.allowedPublicIds.includes(publicId));
-      if (!allowed) return errorBadAuth(res);
+      if (!allowed) {
+        const fails = await recordAuthFailure(login);
+        logger.log('AUTH_FAIL', { reason: 'bad_otp', login, ip, fails });
+        return errorBadAuth(res);
+      }
     }
 
+    await clearAuthFailures(login);
+    logger.log('AUTH_OK', { login, ip, otp: otpRequired });
     res.send({ refresh_token: u.getRefreshToken(), access_token: u.getAccessToken() });
   }
 });
@@ -350,6 +423,24 @@ router.post('/payinvoice', postLimiter, async function (req, res) {
       // else - regular lightning network payment:
 
       var call = lightning.sendPayment();
+
+      // A transport failure, or LND going away mid-payment, arrives as an
+      // 'error' event. With no listener for it the event throws instead: the
+      // HTTP request then never answers at all, leaving the caller unable to
+      // tell whether their payment went out, and the per-user lock held for its
+      // full five minutes so they cannot retry either.
+      //
+      // Release the lock and answer. Deliberately NOT unlockFunds(): a stream
+      // error means the payment's fate is unknown, it may still be in flight,
+      // and scripts/process-locked-payments.js exists to reconcile exactly
+      // that. Freeing the funds here on an unknown outcome is how you spend
+      // them twice.
+      call.on('error', async function (err) {
+        logger.log('/payinvoice', [req.id, 'sendPayment stream error:', err && err.message]);
+        await lock.releaseLock();
+        if (!res.headersSent) return errorLnd(res);
+      });
+
       call.on('data', async function (payment) {
         // payment callback
         await u.unlockFunds(req.body.invoice);
@@ -392,7 +483,7 @@ router.post('/payinvoice', postLimiter, async function (req, res) {
   });
 });
 
-router.get('/getbtc', async function (req, res) {
+router.get('/getbtc', postLimiter, async function (req, res) {
   logger.log('/getbtc', [req.id]);
   let u = new User(redis, bitcoinclient, lightning);
   await u.loadByAuthorization(req.headers.authorization);
@@ -405,15 +496,32 @@ router.get('/getbtc', async function (req, res) {
 
   let address = await u.getAddress();
   if (!address) {
-    await u.generateAddress();
+    // Express 4 does not catch a rejection from an async handler, so letting
+    // this propagate means the request is simply never answered.
+    try {
+      await u.generateAddress();
+    } catch (err) {
+      logger.log('/getbtc', [req.id, 'address generation failed:', String(err && err.message)]);
+      return errorLnd(res);
+    }
     address = await u.getAddress();
   }
+
+  // Generation can also return without having produced anything - a concurrent
+  // attempt still holds the lock, so it exits early. Sending 200 with a null
+  // address hands the wallet a blank deposit address and hides the failure on a
+  // money-in path, which is worse than an error the client can act on.
+  if (!address) {
+    logger.log('/getbtc', [req.id, 'no address available after generation attempt']);
+    return errorLnd(res);
+  }
+
   u.watchAddress(address);
 
   res.send([{ address }]);
 });
 
-router.get('/checkpayment/:payment_hash', async function (req, res) {
+router.get('/checkpayment/:payment_hash', postLimiter, async function (req, res) {
   logger.log('/checkpayment', [req.id]);
   let u = new User(redis, bitcoinclient, lightning);
   await u.loadByAuthorization(req.headers.authorization);
@@ -538,7 +646,7 @@ router.get('/decodeinvoice', postLimiter, async function (req, res) {
   });
 });
 
-router.get('/checkrouteinvoice', async function (req, res) {
+router.get('/checkrouteinvoice', postLimiter, async function (req, res) {
   logger.log('/checkrouteinvoice', [req.id]);
   let u = new User(redis, bitcoinclient, lightning);
   if (!(await u.loadByAuthorization(req.headers.authorization))) {
@@ -555,8 +663,13 @@ router.get('/checkrouteinvoice', async function (req, res) {
   });
 });
 
-router.get('/queryroutes/:source/:dest/:amt', async function (req, res) {
+router.get('/queryroutes/:source/:dest/:amt', postLimiter, async function (req, res) {
   logger.log('/queryroutes', [req.id]);
+
+  let u = new User(redis, bitcoinclient, lightning);
+  if (!(await u.loadByAuthorization(req.headers.authorization))) {
+    return errorBadAuth(res);
+  }
 
   let request = {
     pub_key: req.params.dest,
@@ -570,8 +683,13 @@ router.get('/queryroutes/:source/:dest/:amt', async function (req, res) {
   });
 });
 
-router.get('/getchaninfo/:chanid', async function (req, res) {
+router.get('/getchaninfo/:chanid', postLimiter, async function (req, res) {
   logger.log('/getchaninfo', [req.id]);
+
+  let u = new User(redis, bitcoinclient, lightning);
+  if (!(await u.loadByAuthorization(req.headers.authorization))) {
+    return errorBadAuth(res);
+  }
 
   if (lightningDescribeGraph && lightningDescribeGraph.edges) {
     for (const edge of lightningDescribeGraph.edges) {
@@ -588,7 +706,7 @@ module.exports = router;
 // ################# HELPERS ###########################
 
 function errorBadAuth(res) {
-  return res.send({
+  return res.status(401).send({
     error: true,
     code: 1,
     message: 'bad auth',
@@ -596,7 +714,7 @@ function errorBadAuth(res) {
 }
 
 function errorNotEnougBalance(res) {
-  return res.send({
+  return res.status(403).send({
     error: true,
     code: 2,
     message: 'not enough balance. Make sure you have at least 1% reserved for potential fees',
@@ -604,7 +722,7 @@ function errorNotEnougBalance(res) {
 }
 
 function errorNotAValidInvoice(res) {
-  return res.send({
+  return res.status(422).send({
     error: true,
     code: 4,
     message: 'not a valid invoice',
@@ -612,15 +730,15 @@ function errorNotAValidInvoice(res) {
 }
 
 function errorLnd(res) {
-  return res.send({
+  return res.status(503).send({
     error: true,
     code: 7,
-    message: 'LND failue',
+    message: 'LND failure',
   });
 }
 
 function errorGeneralServerError(res) {
-  return res.send({
+  return res.status(500).send({
     error: true,
     code: 6,
     message: 'Something went wrong. Please try again later',
@@ -628,7 +746,7 @@ function errorGeneralServerError(res) {
 }
 
 function errorBadArguments(res) {
-  return res.send({
+  return res.status(400).send({
     error: true,
     code: 8,
     message: 'Bad arguments',
@@ -636,7 +754,7 @@ function errorBadArguments(res) {
 }
 
 function errorTryAgainLater(res) {
-  return res.send({
+  return res.status(429).send({
     error: true,
     code: 9,
     message: 'Your previous payment is in transit. Try again in 5 minutes',
@@ -644,7 +762,7 @@ function errorTryAgainLater(res) {
 }
 
 function errorPaymentFailed(res) {
-  return res.send({
+  return res.status(400).send({
     error: true,
     code: 10,
     message: 'Payment failed. Does the receiver have enough inbound capacity?',
@@ -652,7 +770,7 @@ function errorPaymentFailed(res) {
 }
 
 function errorSunset(res) {
-  return res.send({
+  return res.status(410).send({
     error: true,
     code: 11,
     message: 'This LNDHub instance is not accepting any more users',
@@ -660,7 +778,7 @@ function errorSunset(res) {
 }
 
 function errorSunsetAddInvoice(res) {
-  return res.send({
+  return res.status(410).send({
     error: true,
     code: 11,
     message: 'This LNDHub instance is scheduled to shut down. Withdraw any remaining funds',

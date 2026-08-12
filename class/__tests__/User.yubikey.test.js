@@ -3,11 +3,17 @@
  * (same instance the app uses), scoped to a throwaway userid so it never
  * touches real account data. Skipped automatically if Redis isn't reachable.
  */
+const crypto = require('crypto');
 const Redis = require('ioredis');
 const config = require('../../config');
 const { User } = require('../User');
 
-const TEST_USERID = '__jest_yubikey_test_userid__';
+// Unique per process. These tests write to the real shared Redis, so a fixed
+// userid means two runs - two overlapping `npm test` invocations, or two jest
+// workers - collide on one key: the afterEach cleanup of one empties the set
+// the other is about to assert on, and the failure looks like a real bug in
+// enrollment rather than a test-isolation problem.
+const TEST_USERID = `__jest_yubikey_test_${process.pid}_${crypto.randomBytes(4).toString('hex')}__`;
 
 let redis;
 let redisAvailable = true;

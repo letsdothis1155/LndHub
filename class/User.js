@@ -61,6 +61,12 @@ export class User {
     if (userid) {
       this._userid = userid;
       await this._generateTokens();
+      // The presented refresh token is spent: a refresh token has to be usable
+      // exactly once, or a stolen one keeps working for its full 30-day life no
+      // matter how often the legitimate client rotates. Deleted only after the
+      // replacement pair is committed, so an interruption here leaves the caller
+      // with a working session rather than none.
+      await this._redis.del('userid_for_' + refresh_token);
       return true;
     }
 
@@ -134,7 +140,15 @@ export class User {
     let self = this;
     return new Promise(function (resolve, reject) {
       self._lightning.newAddress({ type: 0 }, async function (err, response) {
-        if (err) return reject('LND failure when trying to generate new address');
+        if (err) {
+          // Release on failure, or this user cannot get a deposit address for
+          // the lock's full five minutes: the next attempt sees the lock held,
+          // returns early, and looks like a successful generation that produced
+          // nothing. The lock is deliberately left in place on success - the
+          // address exists by then, so callers short-circuit before reaching here.
+          await lock.releaseLock();
+          return reject(new Error('LND failure when trying to generate new address'));
+        }
         const addressAlreadyExists = await self.getAddress();
         if (addressAlreadyExists) {
           // one last final check, for a case of really long race condition
@@ -507,10 +521,18 @@ export class User {
     buffer = crypto.randomBytes(20);
     this._refresh_token = buffer.toString('hex');
 
-    await this._redis.set('userid_for_' + this._acess_token, this._userid);
-    await this._redis.set('userid_for_' + this._refresh_token, this._userid);
-    await this._redis.set('access_token_for_' + this._userid, this._acess_token);
-    await this._redis.set('refresh_token_for_' + this._userid, this._refresh_token);
+    // Access tokens expire in 1 hour; refresh tokens expire in 30 days and are
+    // single-use (see loadByRefreshToken, which spends the one it was given).
+    // A superseded access token is deliberately NOT revoked here - it belongs to
+    // whichever session minted it, and other sessions hold their own. Its 1-hour
+    // TTL is what bounds the exposure of a leaked one.
+    const ACCESS_TTL = 3600;
+    const REFRESH_TTL = 30 * 24 * 3600;
+
+    await this._redis.set('userid_for_' + this._acess_token, this._userid, 'EX', ACCESS_TTL);
+    await this._redis.set('userid_for_' + this._refresh_token, this._userid, 'EX', REFRESH_TTL);
+    await this._redis.set('access_token_for_' + this._userid, this._acess_token, 'EX', ACCESS_TTL);
+    await this._redis.set('refresh_token_for_' + this._userid, this._refresh_token, 'EX', REFRESH_TTL);
   }
 
   async _saveUserToDatabase() {

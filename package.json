@@ -13,7 +13,8 @@
     "login:refresh": "node scripts/login.js refresh",
     "login:whoami": "node scripts/login.js whoami",
     "login:enroll": "node scripts/login.js enroll",
-    "yubikey:reset": "node_modules/.bin/babel-node scripts/yubikey_reset.js"
+    "yubikey:reset": "node_modules/.bin/babel-node scripts/yubikey_reset.js",
+    "password:set": "node scripts/set_password.js"
   },
   "author": "Igor Korsakov <overtorment@gmail.com>",
   "license": "MIT",
@@ -48,10 +49,12 @@
   },
   "devDependencies": {
     "babel-jest": "^30.4.1",
-    "jest": "^30.4.2"
+    "jest": "^30.4.2",
+    "supertest": "^7.2.2"
   },
   "jest": {
-    "testEnvironment": "node"
+    "testEnvironment": "node",
+    "forceExit": true
   },
   "overrides": {
     "uuid": "^11.1.1"

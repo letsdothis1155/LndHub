@@ -3,7 +3,6 @@ process.on('uncaughtException', function (err) {
   console.log('Node NOT Exiting...');
 });
 
-process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
 let express = require('express');
 const helmet = require('helmet');
 let morgan = require('morgan');
@@ -16,9 +15,35 @@ morgan.token('id', function getId(req) {
 });
 
 let app = express();
-app.enable('trust proxy');
-app.use(helmet.hsts());
-app.use(helmet.hidePoweredBy());
+
+// Off unless explicitly configured: with it on, req.ip is taken from a header
+// the client controls, so rate limits can be sidestepped by rotating
+// X-Forwarded-For. Set TRUST_PROXY=1 (or the real hop count) when running
+// behind a reverse proxy. See utils/trustProxy.js.
+const { parseTrustProxy } = require('./utils/trustProxy');
+app.set('trust proxy', parseTrustProxy(process.env.TRUST_PROXY));
+
+// Security headers. CSP allows only same-origin resources; inline style= is
+// required for the progress-bar width attribute in the dashboard template.
+app.use(
+  helmet({
+    contentSecurityPolicy: {
+      directives: {
+        defaultSrc: ["'self'"],
+        scriptSrc: ["'self'"],
+        styleSrc: ["'self'", "'unsafe-inline'"],
+        imgSrc: ["'self'", 'data:'],
+        connectSrc: ["'self'"],
+        fontSrc: ["'self'"],
+        objectSrc: ["'none'"],
+        frameAncestors: ["'none'"],
+        baseUri: ["'self'"],
+        formAction: ["'self'"],
+      },
+    },
+    crossOriginEmbedderPolicy: false,
+  }),
+);
 
 const rateLimit = require('express-rate-limit');
 const limiter = rateLimit({
@@ -47,11 +72,20 @@ app.use('/static', express.static('static'));
 app.use(require('./controllers/api'));
 app.use(require('./controllers/website'));
 
-const bindHost = process.env.HOST || '0.0.0.0';
+// Loopback by default. This is a custodial wallet API: the cost of a wrong
+// default is asymmetric - binding 0.0.0.0 because someone forgot to set HOST
+// exposes everyone's funds to the LAN, while binding 127.0.0.1 when they wanted
+// LAN access is a connection-refused they will notice immediately and can fix
+// with HOST. Exposing it is a deliberate choice, so make it a deliberate edit.
+const bindHost = process.env.HOST || '127.0.0.1';
 const bindPort = process.env.PORT || 3000;
 
 let server = app.listen(bindPort, bindHost, function () {
   logger.log('BOOTING UP', 'Listening on ' + bindHost + ':' + bindPort);
+  if (bindHost === '127.0.0.1' || bindHost === 'localhost') {
+    // the "why can't my phone reach it" answer, before it gets debugged as a bug
+    logger.log('BOOTING UP', 'Loopback only - not reachable from the LAN. Set HOST to change this.');
+  }
   logger.log('using GroundControl', process.env.GROUNDCONTROL);
 });
 module.exports = server;

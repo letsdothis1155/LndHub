@@ -6,6 +6,7 @@ build/
 logs/
 .env
 .lndhub-session.json
+.claude/
 
 # dependencies
 /node_modules
