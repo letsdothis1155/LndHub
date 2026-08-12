@@ -78,6 +78,15 @@ describe('verifyOtp', () => {
     expect(await verifyOtp(VALID_OTP)).toEqual({ valid: false, publicId: null });
   });
 
+  it('rejects a response with NO signature at all when a secret key is configured', async () => {
+    // The dangerous case is not a bad signature but an absent one: if the check
+    // is skipped whenever `h` is missing, anyone who can tamper with this
+    // response simply omits it and decides the second factor themselves.
+    mockYubicoResponse((req) => ({ nonce: req.nonce, otp: req.otp, status: 'OK' }));
+
+    expect(await verifyOtp(VALID_OTP)).toEqual({ valid: false, publicId: null });
+  });
+
   it('rejects when the echoed otp/nonce do not match the request (anti-replay/tamper check)', async () => {
     mockYubicoResponse(() => {
       const base = { nonce: 'wrong-nonce', otp: VALID_OTP, status: 'OK' };

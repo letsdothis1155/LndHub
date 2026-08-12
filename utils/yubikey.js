@@ -67,10 +67,18 @@ async function verifyOtp(otp) {
 
   if (body.otp !== otp || body.nonce !== nonce) return { valid: false, publicId: null };
 
-  if (config.yubico.secretKey && body.h) {
+  // If a secret key is configured, a signature is REQUIRED - not merely checked
+  // when one happens to be present. Treating a missing `h` as "nothing to
+  // verify" means anyone who can tamper with this response just omits it and
+  // the second factor is decided by whatever they send back.
+  if (config.yubico.secretKey) {
+    if (!body.h) return { valid: false, publicId: null };
     const { h, ...rest } = body;
-    const expected = sign(rest, config.yubico.secretKey);
-    if (expected !== h) return { valid: false, publicId: null };
+    const expected = Buffer.from(sign(rest, config.yubico.secretKey));
+    const received = Buffer.from(h);
+    if (expected.length !== received.length || !crypto.timingSafeEqual(expected, received)) {
+      return { valid: false, publicId: null };
+    }
   }
 
   if (body.status !== 'OK') return { valid: false, publicId: null };
