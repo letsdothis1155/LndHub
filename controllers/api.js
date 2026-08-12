@@ -496,9 +496,26 @@ router.get('/getbtc', postLimiter, async function (req, res) {
 
   let address = await u.getAddress();
   if (!address) {
-    await u.generateAddress();
+    // Express 4 does not catch a rejection from an async handler, so letting
+    // this propagate means the request is simply never answered.
+    try {
+      await u.generateAddress();
+    } catch (err) {
+      logger.log('/getbtc', [req.id, 'address generation failed:', String(err && err.message)]);
+      return errorLnd(res);
+    }
     address = await u.getAddress();
   }
+
+  // Generation can also return without having produced anything - a concurrent
+  // attempt still holds the lock, so it exits early. Sending 200 with a null
+  // address hands the wallet a blank deposit address and hides the failure on a
+  // money-in path, which is worse than an error the client can act on.
+  if (!address) {
+    logger.log('/getbtc', [req.id, 'no address available after generation attempt']);
+    return errorLnd(res);
+  }
+
   u.watchAddress(address);
 
   res.send([{ address }]);

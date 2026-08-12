@@ -140,7 +140,15 @@ export class User {
     let self = this;
     return new Promise(function (resolve, reject) {
       self._lightning.newAddress({ type: 0 }, async function (err, response) {
-        if (err) return reject('LND failure when trying to generate new address');
+        if (err) {
+          // Release on failure, or this user cannot get a deposit address for
+          // the lock's full five minutes: the next attempt sees the lock held,
+          // returns early, and looks like a successful generation that produced
+          // nothing. The lock is deliberately left in place on success - the
+          // address exists by then, so callers short-circuit before reaching here.
+          await lock.releaseLock();
+          return reject(new Error('LND failure when trying to generate new address'));
+        }
         const addressAlreadyExists = await self.getAddress();
         if (addressAlreadyExists) {
           // one last final check, for a case of really long race condition
