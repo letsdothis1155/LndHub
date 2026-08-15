@@ -185,6 +185,67 @@ import { fromDirectory } from '@smart-realty/apk-inspect/node';
 
 ---
 
+## Downloading and sideloading
+
+`downloadApk` is transport-agnostic — `fetch` is injected, so it works against
+whatever the catalog is served from without this module knowing anything about
+the hosting.
+
+```ts
+import { downloadAndInspect, sideloadQr, qrToSvg } from './lib/apk/index.js';
+
+const entry = {
+  id: 'com.smartrealty.demo-42',
+  url: 'https://cdn.example/demo.apk',
+  sha256: '…',                       // pinned file hash
+  packageName: 'com.smartrealty.demo',
+  versionCode: 42,
+  signerFingerprints: ['…'],          // pinned signing key
+};
+
+const { verdict, reasons, report } = await downloadAndInspect(entry, {
+  onProgress: ({ ratio }) => setBar(ratio),
+  signal: controller.signal,
+});
+
+if (verdict === 'blocked') showReasons(reasons);
+```
+
+**Nothing unverified escapes.** If the bytes do not match the pinned `sha256`,
+`downloadApk` throws `HashMismatchError` and returns no bytes at all — there is
+no path where unverified content reaches an installer because a caller forgot to
+check a flag. The hash proves you got the file the catalog meant; the inspection
+and the signer pin are what decide whether it should be installed.
+
+`downloadAndInspect` blocks on any critical or high finding, a signer outside
+`signerFingerprints`, or a package name / versionCode that disagrees with the
+catalog (`catalog.package-mismatch`, `catalog.version-mismatch`).
+
+**Resume.** A stream that breaks part-way is retried with a `Range` request when
+the server advertised `Accept-Ranges: bytes`. If the server ignores the range and
+replies `200`, the partial buffer is discarded and the download restarts rather
+than splicing two different responses together. 4xx responses are not retried —
+they describe the request, and retrying only wastes the user's data.
+
+### QR sideload
+
+```ts
+const qr = sideloadQr(entry);          // encodes entry.url
+element.innerHTML = qrToSvg(qr, { scale: 6 });
+```
+
+The encoder is built in — dependency-free, byte mode, versions 1-40, all four
+error-correction levels — because a sideload QR that needs an external library
+would undercut the rest of the package. `qrToSvg`, `qrToImageData` (canvas) and
+`qrToAscii` (terminal) render it; `sideloadQr(entry, { encoder })` accepts your
+own `QrEncoder` if you already have one.
+
+`{ includeHash: true }` appends `#sha256=…` so a companion app can verify what it
+fetched. It is off by default: a bare URL is what a generic camera app handles
+best, and fragments are never sent to the server anyway.
+
+---
+
 ## What it parses
 
 | Module | Format | Notes |
@@ -201,6 +262,8 @@ import { fromDirectory } from '@smart-realty/apk-inspect/node';
 | `batch.ts` | — | Concurrency-bounded scanning with failure isolation |
 | `diff.ts` | — | Cross-version and cross-package comparison, signer pinning |
 | `report.ts` | — | Reproducible batch report, CSV export, threshold checks |
+| `qr.ts` | QR Code (ISO/IEC 18004) | Byte mode, versions 1-40, L/M/Q/H; SVG, canvas and terminal renderers |
+| `download.ts` | — | Injected-`fetch` downloads with hash pinning, resume, and an inspection gate |
 
 ### Attribute lookup
 
@@ -261,7 +324,7 @@ drawing attention, not for deciding intent.
 
 ```bash
 npm install
-npm test              # 176 assertions, no external tools needed
+npm test              # 236 assertions, no external tools needed
 ```
 
 `test/fixtures.ts` builds APKs byte-for-byte to the platform formats — binary
@@ -270,6 +333,15 @@ exercised against real structures. Deflated entries go through Node's `zlib`,
 so `inflate.ts` decompresses data it did not produce. `manifestSpec()` and
 `buildApk()` are parameterized, so the batch tests compare genuinely different
 packages, versions and signers rather than mock objects.
+
+The QR encoder is cross-checked against two independent implementations, both
+devDependencies: every matrix is compared module-for-module against the `qrcode`
+reference encoder with the mask forced on both sides (72 comparisons, all
+identical), and every code this library produces is decoded back with `jsQR`
+(24 round-trips, all recovering the exact input). Downloads are tested against a
+fake `fetch` built on real `Response` and `ReadableStream` objects, covering
+progress, resume after a mid-stream failure, a server that ignores `Range`,
+size and `maxBytes` limits, and retry behaviour by status class.
 
 ```bash
 npm run fixtures      # needs openssl, keytool, jarsigner, zip
@@ -315,3 +387,13 @@ Worth knowing before this gates an install:
 - **Version diffing assumes `versionCode` ordering.** Packages are compared in
   `versionCode` order; a catalog that reuses or rewinds version codes will diff
   in an order that does not match its release history.
+- **The QR encoder is byte mode only.** That is the right mode for URLs, but a
+  payload that is entirely numeric or entirely uppercase-alphanumeric will
+  produce a slightly larger code than an encoder that switches modes. Mask
+  selection follows the spec's four penalty rules, which occasionally picks a
+  different mask from the `qrcode` npm package — that library's rule 4 uses
+  `|ceil(pct/5) - 10|`, over-penalising percentages that are not multiples of
+  five. Both produce valid codes; every code here is decode-tested.
+- **Downloads buffer the whole file.** Progress is streamed, but the bytes are
+  collected before hashing and inspection, because `crypto.subtle.digest` cannot
+  hash incrementally and inspection needs the full archive anyway.

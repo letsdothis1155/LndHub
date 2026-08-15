@@ -25,6 +25,7 @@ import {
   buildZip,
 } from './fixtures.js';
 import { testBatch } from './batch.js';
+import { testPhase2 } from './phase2.js';
 
 let passed = 0;
 let failed = 0;
@@ -371,6 +372,7 @@ async function main(): Promise<void> {
   await testInspectHostileApk();
   await testUnsignedAndBrokenInput();
   await testBatch(check, equal);
+  await testPhase2(check, equal);
 
   console.log(`\n${passed} passed, ${failed} failed`);
   if (failures.length > 0) {
