@@ -449,6 +449,185 @@ export function buildZip(inputs: ZipInput[]): Uint8Array {
   return out.toBytes();
 }
 
+// ---------------------------------------------------------------------------
+// Whole APKs
+// ---------------------------------------------------------------------------
+
+export interface ManifestOptions {
+  packageName?: string;
+  versionCode?: number;
+  versionName?: string;
+  permissions?: string[];
+  debuggable?: boolean;
+  allowBackup?: boolean;
+  /** Emitted only when set, so the default manifest stays byte-identical. */
+  cleartextTraffic?: boolean;
+  targetSdk?: number;
+  minSdk?: number;
+  exportedProvider?: boolean;
+  /** Extra exported activities, to exercise component diffing. */
+  extraExportedActivities?: string[];
+}
+
+const DEFAULT_PERMISSIONS = ['android.permission.CAMERA', 'android.permission.READ_SMS'];
+
+/** Builds the manifest tree. Defaults reproduce the original fixed fixture. */
+export function manifestSpec(options: ManifestOptions = {}): XmlNodeSpec {
+  const {
+    packageName = 'com.smartrealty.demo',
+    versionCode = 42,
+    versionName = '1.4.2',
+    permissions = DEFAULT_PERMISSIONS,
+    debuggable = true,
+    allowBackup = false,
+    cleartextTraffic,
+    targetSdk = 34,
+    minSdk = 24,
+    exportedProvider = true,
+    extraExportedActivities = [],
+  } = options;
+
+  const applicationAttrs: XmlAttrSpec[] = [
+    { name: 'label', android: true, value: { kind: 'ref', id: 0x7f010000 } },
+    { name: 'debuggable', android: true, value: { kind: 'bool', value: debuggable } },
+    { name: 'allowBackup', android: true, value: { kind: 'bool', value: allowBackup } },
+  ];
+  if (cleartextTraffic !== undefined) {
+    applicationAttrs.push({
+      name: 'usesCleartextTraffic',
+      android: true,
+      value: { kind: 'bool', value: cleartextTraffic },
+    });
+  }
+
+  return {
+    name: 'manifest',
+    attrs: [
+      { name: 'package', android: false, value: { kind: 'string', text: packageName } },
+      { name: 'versionCode', android: true, value: { kind: 'int', value: versionCode } },
+      { name: 'versionName', android: true, value: { kind: 'string', text: versionName } },
+    ],
+    children: [
+      {
+        name: 'uses-sdk',
+        attrs: [
+          { name: 'minSdkVersion', android: true, value: { kind: 'int', value: minSdk } },
+          { name: 'targetSdkVersion', android: true, value: { kind: 'int', value: targetSdk } },
+        ],
+      },
+      ...permissions.map((permission) => ({
+        name: 'uses-permission',
+        attrs: [{ name: 'name', android: true, value: { kind: 'string' as const, text: permission } }],
+      })),
+      {
+        name: 'application',
+        attrs: applicationAttrs,
+        children: [
+          {
+            name: 'activity',
+            attrs: [{ name: 'name', android: true, value: { kind: 'string', text: '.MainActivity' } }],
+            children: [
+              {
+                name: 'intent-filter',
+                children: [
+                  {
+                    name: 'action',
+                    attrs: [
+                      {
+                        name: 'name',
+                        android: true,
+                        value: { kind: 'string', text: 'android.intent.action.MAIN' },
+                      },
+                    ],
+                  },
+                  {
+                    name: 'category',
+                    attrs: [
+                      {
+                        name: 'name',
+                        android: true,
+                        value: { kind: 'string', text: 'android.intent.category.LAUNCHER' },
+                      },
+                    ],
+                  },
+                ],
+              },
+            ],
+          },
+          ...extraExportedActivities.map((name) => ({
+            name: 'activity',
+            attrs: [
+              { name: 'name', android: true, value: { kind: 'string' as const, text: name } },
+              { name: 'exported', android: true, value: { kind: 'bool' as const, value: true } },
+            ],
+          })),
+          {
+            name: 'provider',
+            attrs: [
+              { name: 'name', android: true, value: { kind: 'string', text: '.DataProvider' } },
+              {
+                name: 'authorities',
+                android: true,
+                value: { kind: 'string', text: `${packageName}.provider` },
+              },
+              { name: 'exported', android: true, value: { kind: 'bool', value: exportedProvider } },
+            ],
+          },
+        ],
+      },
+    ],
+  };
+}
+
+export interface ApkOptions extends ManifestOptions {
+  extraEntries?: ZipInput[];
+  /** Entry names to omit from META-INF/MANIFEST.MF, faking a post-signing add. */
+  omitFromJarManifest?: string[];
+  weakCertificate?: boolean;
+  /** Reuse an exact certificate across versions, so the signer is unchanged. */
+  certificate?: Uint8Array;
+  label?: string;
+  /** Extra bytes in classes.dex, to make otherwise identical APKs differ. */
+  salt?: string;
+}
+
+/** Builds a complete, v1-signed APK. */
+export function buildApk(options: ApkOptions = {}): Uint8Array {
+  const axml = buildAxml(manifestSpec(options));
+  const arsc = buildArsc(options.label ?? 'Smart Realty Demo');
+  const certificate =
+    options.certificate ??
+    buildCertificate({
+      commonName: options.weakCertificate ? 'Android Debug' : 'Smart Realty',
+      organization: options.weakCertificate ? 'Android' : 'Smart Realty Inc',
+      notBefore: new Date('2024-01-01T00:00:00Z'),
+      notAfter: new Date('2044-01-01T00:00:00Z'),
+      modulusLength: options.weakCertificate ? 1024 : 2048,
+      weakSignatureAlgorithm: options.weakCertificate,
+    });
+
+  const content: ZipInput[] = [
+    { name: 'AndroidManifest.xml', data: axml },
+    { name: 'resources.arsc', data: arsc, store: true },
+    {
+      name: 'classes.dex',
+      data: new TextEncoder().encode(`dex\n035\0${'A'.repeat(2000)}${options.salt ?? ''}`),
+    },
+    { name: 'lib/arm64-v8a/libsmartrealty.so', data: new TextEncoder().encode('ELF'.repeat(300)) },
+    ...(options.extraEntries ?? []),
+  ];
+
+  const omitted = new Set(options.omitFromJarManifest ?? []);
+  const covered = content.map((e) => e.name).filter((name) => !omitted.has(name));
+
+  return buildZip([
+    ...content,
+    { name: 'META-INF/MANIFEST.MF', data: buildJarManifest(covered) },
+    { name: 'META-INF/CERT.SF', data: new TextEncoder().encode('Signature-Version: 1.0\r\n\r\n') },
+    { name: 'META-INF/CERT.RSA', data: buildPkcs7([certificate]), store: true },
+  ]);
+}
+
 /** Builds a META-INF/MANIFEST.MF listing the given entry names. */
 export function buildJarManifest(names: string[]): Uint8Array {
   const lines = ['Manifest-Version: 1.0', 'Created-By: fixtures', ''];

@@ -98,7 +98,32 @@ export const SENSITIVE_PERMISSIONS: Record<string, { group: string; note: string
 const BOMB_SIZE_FLOOR = 1024 * 1024;
 
 /** Permission groups worth calling out at medium rather than low severity. */
-const HIGH_RISK_GROUPS = new Set(['Accessibility', 'Device admin', 'Installer', 'Overlay', 'SMS']);
+export const HIGH_RISK_GROUPS = new Set([
+  'Accessibility',
+  'Device admin',
+  'Installer',
+  'Overlay',
+  'SMS',
+]);
+
+/**
+ * Orders findings worst-first with a total tiebreak.
+ *
+ * Severity alone would leave equal-severity findings in insertion order, which
+ * varies with archive layout. Batch reports get committed and diffed, so the
+ * ordering has to be a function of content only.
+ */
+export function sortFindings(findings: Finding[]): Finding[] {
+  const rank = (s: Severity): number => SEVERITY_ORDER.indexOf(s);
+  return [...findings].sort(
+    (a, b) =>
+      rank(a.severity) - rank(b.severity) ||
+      a.id.localeCompare(b.id) ||
+      (a.evidence ?? '').localeCompare(b.evidence ?? '') ||
+      a.title.localeCompare(b.title) ||
+      a.detail.localeCompare(b.detail),
+  );
+}
 
 export interface AnalyzeInput {
   archive: ZipArchive;
@@ -468,8 +493,7 @@ function summarize(findings: Finding[]): SafetyReport {
     penalty += SEVERITY_WEIGHTS[finding.severity];
   }
 
-  const order = (s: Severity): number => SEVERITY_ORDER.indexOf(s);
-  const sorted = [...findings].sort((a, b) => order(a.severity) - order(b.severity));
+  const sorted = sortFindings(findings);
   const worstSeverity = sorted.find((f) => f.severity !== 'info')?.severity ?? null;
 
   return {

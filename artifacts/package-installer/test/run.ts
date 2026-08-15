@@ -18,13 +18,13 @@ import { inspectApk, toJsonReport } from '../src/inspect.js';
 import {
   buildArsc,
   buildAxml,
+  buildApk,
   buildCertificate,
-  buildJarManifest,
   buildPkcs7,
+  manifestSpec,
   buildZip,
-  type XmlNodeSpec,
-  type ZipInput,
 } from './fixtures.js';
+import { testBatch } from './batch.js';
 
 let passed = 0;
 let failed = 0;
@@ -138,87 +138,8 @@ function testZip(): void {
 // binary XML + resources
 // ---------------------------------------------------------------------------
 
-const MANIFEST_SPEC: XmlNodeSpec = {
-  name: 'manifest',
-  attrs: [
-    { name: 'package', android: false, value: { kind: 'string', text: 'com.smartrealty.demo' } },
-    { name: 'versionCode', android: true, value: { kind: 'int', value: 42 } },
-    { name: 'versionName', android: true, value: { kind: 'string', text: '1.4.2' } },
-  ],
-  children: [
-    {
-      name: 'uses-sdk',
-      attrs: [
-        { name: 'minSdkVersion', android: true, value: { kind: 'int', value: 24 } },
-        { name: 'targetSdkVersion', android: true, value: { kind: 'int', value: 34 } },
-      ],
-    },
-    {
-      name: 'uses-permission',
-      attrs: [{ name: 'name', android: true, value: { kind: 'string', text: 'android.permission.CAMERA' } }],
-    },
-    {
-      name: 'uses-permission',
-      attrs: [{ name: 'name', android: true, value: { kind: 'string', text: 'android.permission.READ_SMS' } }],
-    },
-    {
-      name: 'application',
-      attrs: [
-        { name: 'label', android: true, value: { kind: 'ref', id: 0x7f010000 } },
-        { name: 'debuggable', android: true, value: { kind: 'bool', value: true } },
-        { name: 'allowBackup', android: true, value: { kind: 'bool', value: false } },
-      ],
-      children: [
-        {
-          name: 'activity',
-          attrs: [{ name: 'name', android: true, value: { kind: 'string', text: '.MainActivity' } }],
-          children: [
-            {
-              name: 'intent-filter',
-              children: [
-                {
-                  name: 'action',
-                  attrs: [
-                    {
-                      name: 'name',
-                      android: true,
-                      value: { kind: 'string', text: 'android.intent.action.MAIN' },
-                    },
-                  ],
-                },
-                {
-                  name: 'category',
-                  attrs: [
-                    {
-                      name: 'name',
-                      android: true,
-                      value: { kind: 'string', text: 'android.intent.category.LAUNCHER' },
-                    },
-                  ],
-                },
-              ],
-            },
-          ],
-        },
-        {
-          name: 'provider',
-          attrs: [
-            { name: 'name', android: true, value: { kind: 'string', text: '.DataProvider' } },
-            {
-              name: 'authorities',
-              android: true,
-              value: { kind: 'string', text: 'com.smartrealty.demo.provider' },
-            },
-            { name: 'exported', android: true, value: { kind: 'bool', value: true } },
-          ],
-        },
-      ],
-    },
-  ],
-};
-
 function testAxmlAndResources(): void {
-  const axml = buildAxml(MANIFEST_SPEC);
+  const axml = buildAxml(manifestSpec());
   const root = parseAxml(axml);
   equal('axml: root element', root.name, 'manifest');
   equal('axml: child count', root.children.length, 4);
@@ -334,44 +255,6 @@ async function testCertificates(): Promise<void> {
 // end-to-end inspection
 // ---------------------------------------------------------------------------
 
-interface ApkOptions {
-  extraEntries?: ZipInput[];
-  /** Entry names to omit from META-INF/MANIFEST.MF. */
-  omitFromJarManifest?: string[];
-  weakCertificate?: boolean;
-}
-
-function buildApk(options: ApkOptions = {}): Uint8Array {
-  const axml = buildAxml(MANIFEST_SPEC);
-  const arsc = buildArsc('Smart Realty Demo');
-  const certificate = buildCertificate({
-    commonName: options.weakCertificate ? 'Android Debug' : 'Smart Realty',
-    organization: options.weakCertificate ? 'Android' : 'Smart Realty Inc',
-    notBefore: new Date('2024-01-01T00:00:00Z'),
-    notAfter: new Date('2044-01-01T00:00:00Z'),
-    modulusLength: options.weakCertificate ? 1024 : 2048,
-    weakSignatureAlgorithm: options.weakCertificate,
-  });
-
-  const content: ZipInput[] = [
-    { name: 'AndroidManifest.xml', data: axml },
-    { name: 'resources.arsc', data: arsc, store: true },
-    { name: 'classes.dex', data: new TextEncoder().encode('dex\n035\0' + 'A'.repeat(2000)) },
-    { name: 'lib/arm64-v8a/libsmartrealty.so', data: new TextEncoder().encode('ELF'.repeat(300)) },
-    ...(options.extraEntries ?? []),
-  ];
-
-  const omitted = new Set(options.omitFromJarManifest ?? []);
-  const covered = content.map((e) => e.name).filter((name) => !omitted.has(name));
-
-  return buildZip([
-    ...content,
-    { name: 'META-INF/MANIFEST.MF', data: buildJarManifest(covered) },
-    { name: 'META-INF/CERT.SF', data: new TextEncoder().encode('Signature-Version: 1.0\r\n\r\n') },
-    { name: 'META-INF/CERT.RSA', data: buildPkcs7([certificate]), store: true },
-  ]);
-}
-
 async function testInspectHappyPath(): Promise<void> {
   const apk = buildApk();
   const result = await inspectApk(apk, { now: new Date('2025-06-01T00:00:00Z') });
@@ -412,10 +295,10 @@ async function testInspectHappyPath(): Promise<void> {
 
   const json = toJsonReport(result);
   check('json: serialises', JSON.stringify(json).length > 100);
-  equal('json: package', (json as { package: string }).package, 'com.smartrealty.demo');
+  equal('json: package', json.package, 'com.smartrealty.demo');
   equal(
     'json: certificate count',
-    (json as { certificates: unknown[] }).certificates.length,
+    json.certificates.length,
     1,
   );
 }
@@ -450,7 +333,7 @@ async function testInspectHostileApk(): Promise<void> {
 }
 
 async function testUnsignedAndBrokenInput(): Promise<void> {
-  const axml = buildAxml(MANIFEST_SPEC);
+  const axml = buildAxml(manifestSpec());
   const unsigned = buildZip([
     { name: 'AndroidManifest.xml', data: axml },
     { name: 'classes.dex', data: new TextEncoder().encode('dex') },
@@ -487,6 +370,7 @@ async function main(): Promise<void> {
   await testInspectHappyPath();
   await testInspectHostileApk();
   await testUnsignedAndBrokenInput();
+  await testBatch(check, equal);
 
   console.log(`\n${passed} passed, ${failed} failed`);
   if (failures.length > 0) {

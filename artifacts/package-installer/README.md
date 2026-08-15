@@ -34,8 +34,9 @@ result.report.blockInstall;          // true when anything critical/high fired
 result.report.findings;              // sorted worst-first
 ```
 
-For a catalog entry or a downloadable report, `toJsonReport(result)` returns a
-plain JSON-safe object.
+For a catalog entry or a downloadable report, `toJsonReport(result)` returns an
+`ApkJsonReport` — a plain, typed, JSON-safe object holding no reference to the
+archive bytes.
 
 Large APKs should be inspected off the main thread:
 
@@ -53,6 +54,137 @@ so a hostile package still produces a report rather than an exception.
 
 ---
 
+## Scanning many packages
+
+One APK at a time answers "is this safe to install". A catalog needs the
+comparative questions too: did the signing key change between versions, did the
+update quietly add SMS access, do two entries claim the same identity with
+different bytes. `scanBatch` + `analyzeBatch` answer those.
+
+```ts
+import { scanBatch, buildBatchReport, sourceFromFile } from './lib/apk/index.js';
+
+const results = await scanBatch([...files].map(sourceFromFile), {
+  concurrency: 4,
+  onProgress: ({ completed, total }) => setProgress(completed / total),
+  signal: controller.signal,
+});
+
+const report = buildBatchReport(results, { pins });
+report.totals;     // scanned / ok / failed / blocked / clean
+report.packages;   // grouped by package, versions ordered by versionCode
+report.findings;   // cross-version, cross-package and pinning findings
+```
+
+A source is anything that can produce bytes on demand:
+
+```ts
+interface ApkSource {
+  id: string;                    // filename, catalog id, URL — used in the report
+  size?: number;
+  load(): Promise<Uint8Array>;
+}
+```
+
+`sourceFromFile`, `sourceFromBytes`, and (Node only) `fromPath` / `fromDirectory`
+/ `fromPaths` cover the usual cases.
+
+**Memory.** `ApkInspection` holds the entire APK via `archive.bytes`. Keeping an
+array of them would pin every package in memory at once, so `scanBatch` projects
+each result to `ApkJsonReport` and drops the bytes. Pass
+`keepInspections: true` only for small batches where you need the archive back.
+
+**Parallelism, honestly.** Parsing is CPU-bound and synchronous — inflate in
+particular — so `concurrency` mostly overlaps `load()` I/O with parsing rather
+than decoding in parallel. Real parallelism needs Workers; supply your own
+Worker-backed function via the `inspect` option. This library deliberately ships
+no bundler-specific worker file.
+
+**Failure isolation.** A corrupt or non-archive input becomes
+`{ status: 'failed', error }` and the batch continues — one bad package in a
+catalog never costs you the rest. Results come back in input order regardless of
+completion order.
+
+**Cancellation.** Pass an `AbortSignal`. In-flight items finish, the remainder
+are never started, and `scanBatch` rejects with a `BatchAbortError`
+(`name === 'AbortError'`) carrying `partialResults`.
+
+### Pinning signing keys
+
+Signatures are parsed, not verified (see Limitations), so the guarantee worth
+having is *"this is the same key that signed the build I already trusted"*:
+
+```ts
+import { checkPins } from './lib/apk/index.js';
+
+const pins = { 'com.smartrealty.demo': ['63a9640e5114c92e…'] };
+checkPins(entries, pins);   // critical finding when a package is signed by another key
+```
+
+Fingerprints may be bare lowercase hex or colon-separated uppercase — the form
+`keytool` prints. A package with no pin entry produces an `info` finding, so
+gaps in the pin file are visible rather than silent.
+
+### Batch findings
+
+Same `Finding` shape as the per-APK rules, so the same UI renders both.
+
+- `diff.signer-changed` — **high** when the key sets are disjoint, **medium**
+  when they overlap. Android rejects such an update unless the new key carries a
+  valid v3 rotation lineage; this tool does not parse or verify that lineage, and
+  the finding text says so.
+- `diff.permissions-added` / `diff.permissions-removed` — severity lifted when
+  an added permission is sensitive, reusing the same descriptions as the
+  single-APK rules.
+- `diff.target-sdk-decreased`, `diff.min-sdk-decreased`,
+  `diff.debuggable-introduced`, `diff.cleartext-introduced`,
+  `diff.exported-components-added`.
+- `batch.identity-collision` — **critical**; same package and versionCode, two
+  different file hashes.
+- `batch.shared-signer` — **info**; distinct packages signed by one key, useful
+  for grouping a catalog by publisher.
+- `pin.signer-mismatch` — **critical**. `pin.unpinned` — **info**.
+
+### Reports are reproducible
+
+`buildBatchReport` output is byte-identical across runs given the same inputs and
+`generatedAt`, so reports can be committed and diffed. Wall-clock durations are
+excluded unless you ask for them with `includeTimings: true`. `toCsv(report)`
+gives one row per APK for spreadsheet triage.
+
+---
+
+## Command line
+
+```bash
+npm run build
+node dist/src/node/cli.js ./apks --out reports/ --pins pins.json --fail-on high
+```
+
+Paths may be APK files or directories (searched recursively). Exits **1** when a
+finding at or above `--fail-on` fires and **2** on a usage error, so it works as
+a CI gate for the catalog.
+
+| Flag | Meaning |
+| --- | --- |
+| `--out <dir>` | Write `batch.json`/`batch.csv` plus one report per APK |
+| `--pins <file>` | JSON map of package name → `[expected signer SHA-256]` |
+| `--concurrency <n>` | Sources scanned at once (default 4) |
+| `--format json\|csv` | Batch report format (default json) |
+| `--fail-on <severity>` | `critical\|high\|medium\|low\|info\|none` (default none) |
+| `--generated-at <iso>` | Fixed timestamp, for reproducible output |
+| `--timings` | Include per-source durations (breaks reproducibility) |
+| `--quiet` | Suppress progress output |
+
+Node-only helpers live behind the `./node` subpath so a browser bundle never
+pulls `node:fs`:
+
+```ts
+import { fromDirectory } from '@smart-realty/apk-inspect/node';
+```
+
+---
+
 ## What it parses
 
 | Module | Format | Notes |
@@ -65,7 +197,10 @@ so a hostile package still produces a report rather than an exception.
 | `asn1.ts` | DER | Rejects BER indefinite-length encodings |
 | `x509.ts` | X.509 | Subject/issuer, validity, key size, signature algorithm, fingerprints |
 | `signing.ts` | v1 (PKCS#7) + v2/v3/v3.1 signing block | Detects which schemes are present, and every signer's certificate |
-| `safety.ts` | — | Findings and score |
+| `safety.ts` | — | Per-APK findings and score |
+| `batch.ts` | — | Concurrency-bounded scanning with failure isolation |
+| `diff.ts` | — | Cross-version and cross-package comparison, signer pinning |
+| `report.ts` | — | Reproducible batch report, CSV export, threshold checks |
 
 ### Attribute lookup
 
@@ -126,13 +261,15 @@ drawing attention, not for deciding intent.
 
 ```bash
 npm install
-npm test              # 110 assertions, no external tools needed
+npm test              # 176 assertions, no external tools needed
 ```
 
 `test/fixtures.ts` builds APKs byte-for-byte to the platform formats — binary
 XML, `resources.arsc`, DER certificates, PKCS#7, ZIP — so the parsers are
 exercised against real structures. Deflated entries go through Node's `zlib`,
-so `inflate.ts` decompresses data it did not produce.
+so `inflate.ts` decompresses data it did not produce. `manifestSpec()` and
+`buildApk()` are parameterized, so the batch tests compare genuinely different
+packages, versions and signers rather than mock objects.
 
 ```bash
 npm run fixtures      # needs openssl, keytool, jarsigner, zip
@@ -164,11 +301,17 @@ Worth knowing before this gates an install:
   output; no Android build tools were available here, so the binary XML and
   resource-table readers were tested against fixtures written to the documented
   format. Run them over a handful of real APKs from the catalog before trusting
-  them in production — that is the one gap I would close first.
+  them in production — that is the one gap I would close first, and the CLI now
+  makes it a one-command exercise:
+  `node dist/src/node/cli.js ./real-apks --out reports/`.
 - **v4 signatures** (`.apk.idsig`, a sidecar file) are not read.
 - **APK Signing Block digests** are located and their algorithms named, but the
   content digests are not recomputed.
 - **DEX bytecode is not analysed.** Native libraries under `lib/` are reported
   as present and nothing more.
-- **Everything is held in memory.** For multi-hundred-megabyte APKs, stream or
-  inspect off the main thread.
+- **One APK is held in memory at a time.** A batch releases each package's bytes
+  after projecting it to JSON, but a single multi-hundred-megabyte APK is still
+  fully buffered — inspect those off the main thread.
+- **Version diffing assumes `versionCode` ordering.** Packages are compared in
+  `versionCode` order; a catalog that reuses or rewinds version codes will diff
+  in an order that does not match its release history.

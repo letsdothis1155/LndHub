@@ -7,8 +7,8 @@
 
 import { ResourceTable } from './arsc.js';
 import { digest, toHex } from './bytes.js';
-import { parseAndroidManifest, type AndroidManifest } from './manifest.js';
-import { analyze, type SafetyReport } from './safety.js';
+import { parseAndroidManifest, type AndroidManifest, type ComponentKind } from './manifest.js';
+import { analyze, type SafetyReport, type Severity } from './safety.js';
 import {
   collectSignatures,
   parseJarManifestEntryNames,
@@ -141,8 +141,78 @@ function summarizeFiles(entries: ZipEntry[]): ApkFileSummary {
   };
 }
 
+export interface ApkCertificateReport {
+  scheme: 'v1' | 'v2' | 'v3' | 'v3.1';
+  subject: string;
+  issuer: string;
+  serialNumber: string;
+  notBefore: string | null;
+  notAfter: string | null;
+  signatureAlgorithm: string;
+  keyAlgorithm: string;
+  keySizeBits: number | null;
+  selfSigned: boolean;
+  sha256: string;
+}
+
+export interface ApkFindingReport {
+  id: string;
+  severity: Severity;
+  title: string;
+  detail: string;
+  evidence: string | null;
+}
+
+/**
+ * The durable, JSON-safe view of one APK.
+ *
+ * This — not `ApkInspection` — is what a batch retains and what a catalog
+ * stores: it holds no reference to the archive bytes.
+ */
+export interface ApkJsonReport {
+  sha256: string;
+  size: number;
+  package: string | null;
+  versionCode: number | null;
+  versionName: string | null;
+  label: string | null;
+  minSdkVersion: number | null;
+  targetSdkVersion: number | null;
+  manifestError: string | null;
+  application: {
+    debuggable: boolean;
+    allowBackup: boolean;
+    usesCleartextTraffic: boolean | null;
+    testOnly: boolean;
+    sharedUserId: string | null;
+  };
+  permissions: string[];
+  exportedComponents: { kind: ComponentKind; name: string; permission: string | null }[];
+  signatureSchemes: {
+    v1: boolean;
+    v2: boolean;
+    v3: boolean;
+    v31: boolean;
+    sourceStamp: boolean;
+  };
+  certificates: ApkCertificateReport[];
+  files: {
+    totalEntries: number;
+    totalUncompressedSize: number;
+    dexFiles: string[];
+    nativeAbis: string[];
+  };
+  safety: {
+    score: number;
+    worstSeverity: Severity | null;
+    blockInstall: boolean;
+    counts: Record<Severity, number>;
+    findings: ApkFindingReport[];
+  };
+}
+
 /** JSON-safe projection, for catalog storage or a downloadable report. */
-export function toJsonReport(inspection: ApkInspection): Record<string, unknown> {
+export function toJsonReport(inspection: ApkInspection): ApkJsonReport {
   const { manifest, signatures, report, files } = inspection;
   return {
     sha256: inspection.sha256,
@@ -154,6 +224,13 @@ export function toJsonReport(inspection: ApkInspection): Record<string, unknown>
     minSdkVersion: manifest?.minSdkVersion ?? null,
     targetSdkVersion: manifest?.targetSdkVersion ?? null,
     manifestError: inspection.manifestError,
+    application: {
+      debuggable: manifest?.application.debuggable ?? false,
+      allowBackup: manifest?.application.allowBackup ?? true,
+      usesCleartextTraffic: manifest?.application.usesCleartextTraffic ?? null,
+      testOnly: manifest?.application.testOnly ?? false,
+      sharedUserId: manifest?.sharedUserId ?? null,
+    },
     permissions: manifest?.usesPermissions.map((p) => p.name) ?? [],
     exportedComponents:
       manifest?.components
